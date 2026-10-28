@@ -250,6 +250,7 @@ def make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 send_json(self, 200, {
                     "endpoint": config["endpoint"],
                     "model": config["model"],
+                    "prompt_model": bool(state.get("prompt_model", False)),
                     "system": config["system"],
                     "enter_sends": bool(config["enter_sends"]),
                     "tui_enabled": bool(config["tui_enabled"]),
@@ -268,6 +269,9 @@ def make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:
             if self.path == "/api/settings":
                 self.update_settings()
+                return
+            if self.path == "/api/models":
+                self.list_models()
                 return
             if self.path == "/api/chat":
                 self.chat()
@@ -288,6 +292,28 @@ def make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 send_json(self, 400, {"error": "요청 본문은 JSON 객체여야 합니다."})
                 return None
             return body
+
+        def list_models(self) -> None:
+            incoming = self.read_json_body()
+            if incoming is None:
+                return
+            candidate = self.config_snapshot()
+            endpoint = incoming.get("endpoint", candidate["endpoint"])
+            if not isinstance(endpoint, str) or not endpoint.strip():
+                send_json(self, 400, {"error": "Endpoint를 입력하세요."})
+                return
+            candidate["endpoint"] = endpoint.strip()
+            if incoming.get("clear_api_key") is True:
+                candidate["api_key"] = ""
+            elif isinstance(incoming.get("api_key"), str) and incoming["api_key"].strip():
+                candidate["api_key"] = incoming["api_key"].strip()
+            candidate["timeout"] = min(float(candidate["timeout"]), 8)
+            try:
+                models = parse_available_models(fetch_models_response(candidate))
+            except CheckError as error:
+                send_json(self, 502, {"stage": error.stage, "error": str(error)})
+                return
+            send_json(self, 200, {"models": models})
 
         def update_settings(self) -> None:
             incoming = self.read_json_body()
@@ -536,11 +562,12 @@ def main() -> int:
             str(ROOT / "lchat.py"),
             "--config", str(path),
             "--endpoint", str(config["endpoint"]),
-            "--model", str(config["model"]),
             "--system", str(config["system"]),
             "--timeout", str(config["timeout"]),
             "--terminal-only",
         ]
+        if args.model is not None:
+            command.extend(("--model", args.model))
         if args.no_stream:
             command.append("--no-stream")
         if config.get("temperature") not in (None, ""):
@@ -569,8 +596,8 @@ def main() -> int:
 
     if not isinstance(config["endpoint"], str) or not config["endpoint"].strip():
         parser.error("--endpoint 또는 OPENAI_BASE_URL/config.json의 endpoint가 필요합니다.")
-    if not isinstance(config["model"], str) or not config["model"].strip():
-        parser.error("--model 또는 OPENAI_MODEL/config.json의 model이 필요합니다.")
+    if not isinstance(config["model"], str):
+        parser.error("설정 파일의 model은 문자열이어야 합니다.")
     if not isinstance(config["host"], str) or not config["host"].strip():
         parser.error("--host 또는 LCHAT_HOST는 비어 있을 수 없습니다.")
     try:
@@ -593,27 +620,22 @@ def main() -> int:
     except ValueError as error:
         parser.error(str(error))
 
-    print("[1/3] Endpoint 접속 및 API 응답 확인 중…", flush=True)
+    print("[1/3] Endpoint 접속 및 모델 목록 확인 중…", flush=True)
     try:
-        raw_models = fetch_models_response(config)
+        check_config = {**config, "timeout": min(config["timeout"], 8)}
+        available = parse_available_models(fetch_models_response(check_config))
+        if config["model"] in available:
+            print(f"[완료] 모델 확인됨 (API 목록 {len(available)}개).", flush=True)
+        else:
+            print("[안내] 지정한 모델이 없습니다. UI에서 모델 목록을 확인하고 선택하세요.", flush=True)
     except CheckError as error:
-        print(f"[실패: {error.stage}] {error}", flush=True)
-        return 2
-    print("[완료] Endpoint에 접속할 수 있고 GET /models가 응답합니다.", flush=True)
-    print(f"[2/3] 모델 '{config['model']}' 존재 여부 확인 중…", flush=True)
-    try:
-        available = parse_available_models(raw_models)
-        verify_model_exists(config["model"], available)
-    except CheckError as error:
-        print(f"[실패: {error.stage}] {error}", flush=True)
-        return 2
-    print(f"[완료] 모델 확인됨 (API 목록 {len(available)}개).", flush=True)
+        print(f"[경고: {error.stage}] {error} · UI 설정에서 다시 확인하세요.", flush=True)
     print(f"[3/3] {config['host']}:{config['port']} 바인딩 확인 중…", flush=True)
     has_tty = sys.stdin.isatty() and sys.stdout.isatty()
     if args.tui and not has_tty:
         parser.error("--tui를 사용하려면 대화형 터미널이 필요합니다.")
     run_tui = launch_tui and has_tty
-    state: dict[str, Any] = {"config": config, "config_path": path, "lock": threading.RLock(), "quiet": run_tui}
+    state: dict[str, Any] = {"config": config, "config_path": path, "lock": threading.RLock(), "quiet": run_tui, "prompt_model": not bool(args.model and args.model.strip())}
     try:
         server = ThreadingHTTPServer((config["host"], config["port"]), make_handler(state))
     except OSError as error:

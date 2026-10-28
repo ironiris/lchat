@@ -467,7 +467,10 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             }
             events.put(("done", {"content": "".join(pieces), "thinking": "".join(reasoning_parts), "metrics": metrics}))
         except urllib.error.HTTPError as error:
-            events.put(("error", error_message(error)))
+            detail = error_message(error)
+            events.put(("error", detail))
+            if error.code == 404 or (error.code in (400, 422) and "model" in detail.lower()):
+                events.put(("recheck_models", None))
         except urllib.error.URLError as error:
             events.put(("error", f"Could not connect: {getattr(error, 'reason', error)}"))
         except (OSError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -579,6 +582,70 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             except curses.error:
                 pass
 
+        def choose_model(available: list[str], current: str) -> str | None:
+            if not available:
+                return None
+            selected = available.index(current) if current in available else 0
+            first = 0
+            while True:
+                rows, columns = screen.getmaxyx()
+                if rows < 10 or columns < 30:
+                    return None
+                height = min(rows - 2, max(8, min(len(available) + 5, 20)))
+                width = min(columns - 2, 84)
+                top, left = (rows - height) // 2, (columns - width) // 2
+                win = curses.newwin(height, width, top, left)
+                win.keypad(True)
+                win.timeout(-1)
+                visible = height - 4
+                first = max(0, min(first, max(0, len(available) - visible)))
+                if selected < first:
+                    first = selected
+                elif selected >= first + visible:
+                    first = selected - visible + 1
+                win.box()
+                def label(row: int, text: str, attr: int = 0) -> None:
+                    clipped = ""
+                    for char in text:
+                        if terminal_cell_width(clipped + char) > width - 4:
+                            break
+                        clipped += char
+                    try:
+                        win.addstr(row, 2, clipped, attr)
+                    except curses.error:
+                        pass
+                label(1, "모델 선택 · 서버에서 제공하는 모델", curses.A_BOLD | curses.color_pair(1))
+                for row, index in enumerate(range(first, min(len(available), first + visible)), 2):
+                    label(row, ("▶ " if index == selected else "  ") + available[index], curses.A_REVERSE if index == selected else 0)
+                label(height - 2, f"↑/↓ 선택 · Enter 확인 · Esc 취소  ({selected + 1}/{len(available)})")
+                win.refresh()
+                try:
+                    key = win.get_wch()
+                except curses.error:
+                    continue
+                if key in ("\x1b", "\x03", "\x04"):
+                    return None
+                if key in ("\n", "\r", curses.KEY_ENTER):
+                    return available[selected]
+                if key == curses.KEY_UP:
+                    selected = max(0, selected - 1)
+                elif key == curses.KEY_DOWN:
+                    selected = min(len(available) - 1, selected + 1)
+                elif key == curses.KEY_PPAGE:
+                    selected = max(0, selected - visible)
+                elif key == curses.KEY_NPAGE:
+                    selected = min(len(available) - 1, selected + visible)
+                elif key == curses.KEY_RESIZE:
+                    continue
+                elif key == curses.KEY_MOUSE:
+                    try:
+                        _, mx, my, _, buttons = curses.getmouse()
+                        index = first + my - top - 2
+                        if left <= mx < left + width and 0 <= index < len(available) and 2 <= my - top < 2 + visible and buttons & (getattr(curses, "BUTTON1_CLICKED", 0) | getattr(curses, "BUTTON1_PRESSED", 0)):
+                            return available[index]
+                    except curses.error:
+                        pass
+
         def edit_settings() -> dict[str, Any] | None:
             nonlocal status
             rows, columns = screen.getmaxyx()
@@ -640,8 +707,8 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 nonlocal message, clear_api_key
                 endpoint = str(values["endpoint"]).strip()
                 model = str(values["model"]).strip()
-                if not endpoint or not model:
-                    message = "오류: Endpoint와 Model ID를 입력하세요."
+                if not endpoint:
+                    message = "오류: Endpoint를 입력하세요."
                     return None
                 try:
                     timeout = float(values["timeout"])
@@ -670,10 +737,20 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 win.refresh()
                 try:
                     completion_url(endpoint)
-                    from webchat import fetch_models_response, parse_available_models, verify_model_exists
+                    from webchat import fetch_models_response, parse_available_models
                     check_config = {"endpoint": endpoint, "model": model, "api_key": key, "timeout": timeout}
                     available = parse_available_models(fetch_models_response(check_config))
-                    verify_model_exists(model, available)
+                    if model not in available:
+                        if not available:
+                            message = "오류: 서버에 사용 가능한 모델이 없습니다."
+                            return None
+                        chosen = choose_model(available, model)
+                        win.touchwin()
+                        if chosen is None:
+                            message = "모델 선택을 취소했습니다."
+                            return None
+                        model = chosen
+                        values["model"] = model
                     path = Path(args.config_path)
                     saved: dict[str, Any] = {}
                     if path.exists():
@@ -897,13 +974,46 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     rendered.append(("  " + line, 0, None))
             return rendered
 
+        def check_models(force_selection: bool = False) -> None:
+            snapshot = {"endpoint": args.endpoint, "model": args.model, "api_key": args.api_key, "timeout": min(args.timeout, 8)}
+            def worker() -> None:
+                try:
+                    from webchat import fetch_models_response, parse_available_models
+                    available = parse_available_models(fetch_models_response(snapshot))
+                    events.put(("models", (snapshot["endpoint"], snapshot["model"], available, force_selection)))
+                except Exception as error:
+                    events.put(("models_error", (snapshot["endpoint"], str(error))))
+            threading.Thread(target=worker, daemon=True).start()
+
+        check_models(force_selection=not args.model_explicit)
         while True:
             while True:
                 try:
                     event, value = events.get_nowait()
                 except queue.Empty:
                     break
-                if event == "token":
+                if event == "models":
+                    endpoint, checked_model, available, force_selection = value
+                    if endpoint != args.endpoint or checked_model != args.model or busy:
+                        continue
+                    if force_selection or checked_model not in available:
+                        if not available:
+                            status = "서버에 사용 가능한 모델이 없습니다. F2에서 설정을 확인하세요."
+                        else:
+                            selected = choose_model(available, checked_model)
+                            screen.touchwin()
+                            if selected is not None:
+                                args.model = selected
+                                status = f"모델 선택: {selected} · 현재 실행에 적용 (저장: F2 설정)"
+                            else:
+                                status = "모델 선택 취소 · F4로 목록 다시 확인"
+                elif event == "recheck_models":
+                    check_models()
+                elif event == "models_error":
+                    endpoint, detail = value
+                    if endpoint == args.endpoint and not busy:
+                        status = f"모델 목록 확인 실패: {detail} · F4 재시도"
+                elif event == "token":
                     streaming_raw += value
                     streaming_text, _ = split_thinking_text(streaming_raw)
                 elif event == "thinking":
@@ -1062,6 +1172,10 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 if key == curses.KEY_F3:
                     toggle_latest_thinking()
                     continue
+                if key == curses.KEY_F4:
+                    status = "서버 모델 목록 확인 중…"
+                    check_models(force_selection=True)
+                    continue
                 if key in (3, 4):
                     return 0
                 if key == 21:
@@ -1134,7 +1248,9 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     status = "대화 기록을 지웠습니다."
                     continue
                 if not args.model:
-                    status = "설정 버튼 또는 F2에서 모델 ID를 선택하세요."
+                    input_text = text
+                    cursor = len(text)
+                    status = "모델이 선택되지 않았습니다. F4로 목록을 확인하세요."
                     continue
                 conversation.append({"role": "user", "content": text})
                 payload: dict[str, Any] = {
@@ -1174,6 +1290,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    args.model_explicit = bool(args.model and args.model.strip())
     config_path = (Path(args.config).expanduser() if args.config else DEFAULT_CONFIG_PATH).resolve()
     if args.cfg:
         print(config_path)

@@ -66,7 +66,7 @@
   .modal-body { display:grid; gap:14px; max-height:calc(90dvh - 130px); overflow:auto; padding:18px 21px; }
   .field { display:grid; gap:6px; }
   .field label { color:#c7cad3; font-size:12px; font-weight:600; }
-  .field input,.field textarea { width:100%; border:1px solid #3b3e48; border-radius:8px; padding:9px 10px; background:#111319; color:var(--text); outline:0; }
+  .field input,.field textarea,.field select { width:100%; border:1px solid #3b3e48; border-radius:8px; padding:9px 10px; background:#111319; color:var(--text); outline:0; }
   .field input:focus,.field textarea:focus { border-color:#806cab; }
   .field textarea { resize:vertical; min-height:76px; }
   .field small { color:var(--muted); font-size:11px; }
@@ -129,7 +129,7 @@
       <div class="modal-head"><h2>환경 설정</h2><button class="close-btn" id="close-settings" type="button" aria-label="닫기">×</button></div>
       <div class="modal-body">
         <div class="field"><label for="endpoint">API Endpoint</label><input id="endpoint" name="endpoint" type="url" required placeholder="http://localhost:8070/v1"><small>기본 URL 또는 전체 /chat/completions URL을 입력하세요. 저장 전에 /models와 모델 ID를 확인합니다.</small></div>
-        <div class="field"><label for="model">모델명 (API의 ID와 정확히 일치)</label><input id="model" name="model" required placeholder="예: Qwen3.8FN"></div>
+        <div class="field"><label for="model">모델명 (API의 ID와 정확히 일치)</label><input id="model" name="model" required placeholder="예: Qwen3.8FN"><button class="action-btn" id="load-models" type="button">서버 모델 목록 불러오기</button><select id="model-list" aria-label="사용 가능한 모델" hidden></select><small id="model-list-status"></small></div>
         <div class="field"><label for="api-key">API Key</label><input id="api-key" name="api_key" type="password" autocomplete="new-password" placeholder="저장된 키를 유지하려면 비워두세요"><label class="check-row"><input id="clear-api-key" type="checkbox"> 기존 API 키 삭제</label></div>
         <div class="field"><label for="system">시스템 프롬프트</label><textarea id="system" name="system" rows="3"></textarea></div>
         <div class="grid-two">
@@ -392,6 +392,50 @@
     document.querySelector('#model-label').textContent = config.model || '모델 미설정';
   }
 
+  async function loadModels() {
+    const list = document.querySelector('#model-list');
+    const status = document.querySelector('#model-list-status');
+    status.textContent = '서버 모델 목록 확인 중…';
+    list.hidden = true;
+    try {
+      const response = await fetch('/api/models', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({endpoint:document.querySelector('#endpoint').value.trim(), api_key:document.querySelector('#api-key').value, clear_api_key:document.querySelector('#clear-api-key').checked})
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || response.statusText);
+      list.replaceChildren();
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = '모델을 선택하세요';
+      list.append(placeholder);
+      for (const name of result.models) {
+        const option = document.createElement('option');
+        option.value = name;
+        option.textContent = name;
+        list.append(option);
+      }
+      list.value = result.models.includes(document.querySelector('#model').value) ? document.querySelector('#model').value : '';
+      list.hidden = !result.models.length;
+      status.textContent = result.models.length ? `${result.models.length}개 모델을 찾았습니다. 선택 후 저장하세요.` : '서버에 사용 가능한 모델이 없습니다.';
+      return result.models;
+    } catch (error) {
+      status.textContent = `모델 목록 확인 실패: ${error.message}`;
+      return null;
+    }
+  }
+  document.querySelector('#load-models').addEventListener('click', loadModels);
+  document.querySelector('#model-list').addEventListener('change', event => {
+    if (event.target.value) document.querySelector('#model').value = event.target.value;
+  });
+  document.querySelector('#model-list').addEventListener('keydown', event => {
+    if (event.key === 'Enter' && event.target.value) {
+      event.preventDefault();
+      document.querySelector('#model').value = event.target.value;
+      document.querySelector('#settings-form').requestSubmit();
+    }
+  });
+
   document.querySelector('#open-settings').addEventListener('click', async () => {
     try { await loadSettings(); dialog.showModal(); }
     catch (error) { toast(error.message); }
@@ -488,11 +532,23 @@
       document.querySelector('#chat-form').requestSubmit();
     }
   });
-  fetch('/api/config', {cache:'no-store'}).then(response => response.json()).then(config => {
+  fetch('/api/config', {cache:'no-store'}).then(response => response.json()).then(async config => {
     document.querySelector('#model-label').textContent = config.model || '모델 미설정';
     enterSends = config.enter_sends !== false;
     document.querySelector('#enter-sends').checked = enterSends;
     updateKeyboardHint();
+    await loadSettings();
+    const models = await loadModels();
+    if (config.prompt_model || !config.model || (models && !models.includes(config.model))) {
+      if (!dialog.open) dialog.showModal();
+      if (models?.length) {
+        const hasDefault = models.includes(config.model);
+        document.querySelector('#model-list-status').textContent = hasDefault ? '설정된 모델이 선택되어 있습니다. Enter로 확인하거나 다른 모델을 선택하세요.' : '모델을 선택한 뒤 저장하세요.';
+        document.querySelector('#model-list').focus();
+      } else if (models) {
+        document.querySelector('#model-list-status').textContent = '서버에 사용 가능한 모델이 없습니다.';
+      }
+    }
   }).catch(() => {
     document.querySelector('#model-label').textContent = '설정 오류';
     document.querySelector('#status-dot').style.background = '#e56b6f';
