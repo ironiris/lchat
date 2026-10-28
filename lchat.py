@@ -486,6 +486,49 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             pass
         screen.keypad(True)
         screen.timeout(80)
+        if hasattr(curses, "set_escdelay"):
+            curses.set_escdelay(35)
+
+        focus_event = object()
+
+        def read_key(window: Any, timeout: int) -> Any:
+            """Consume terminal focus reports without inserting their bytes as text."""
+            key = window.get_wch()
+            if isinstance(key, int) and curses.keyname(key) in (b"kxIN", b"kxOUT"):
+                if curses.keyname(key) == b"kxIN":
+                    screen.clearok(True)
+                    screen.refresh()
+                    window.touchwin()
+                return focus_event
+            if key == "\x0c":
+                screen.clearok(True)
+                screen.refresh()
+                window.touchwin()
+                return focus_event
+            if key != "\x1b":
+                return key
+            following: list[Any] = []
+            try:
+                window.timeout(35)
+                for _ in range(2):
+                    try:
+                        following.append(window.get_wch())
+                    except curses.error:
+                        break
+            finally:
+                window.timeout(timeout)
+            if following in (["[", "I"], ["[", "O"]):
+                if following[1] == "I":
+                    screen.clearok(True)
+                    screen.refresh()
+                    window.touchwin()
+                return focus_event
+            for part in reversed(following):
+                if isinstance(part, int):
+                    curses.ungetch(part)
+                else:
+                    curses.unget_wch(part)
+            return key
         try:
             curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
         except curses.error:
@@ -620,8 +663,10 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 label(height - 2, f"↑/↓ 선택 · Enter 확인 · Esc 취소  ({selected + 1}/{len(available)})")
                 win.refresh()
                 try:
-                    key = win.get_wch()
+                    key = read_key(win, -1)
                 except curses.error:
+                    continue
+                if key is focus_event:
                     continue
                 if key in ("\x1b", "\x03", "\x04"):
                     return None
@@ -645,6 +690,104 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                             return available[index]
                     except curses.error:
                         pass
+
+        def edit_system_prompt(initial: str) -> str | None:
+            text = initial
+            cursor = len(text)
+            first_row = 0
+            goal_column: int | None = None
+            while True:
+                rows, columns = screen.getmaxyx()
+                if rows < 16 or columns < 50:
+                    return None
+                height, width = min(rows - 2, 22), min(columns - 4, 96)
+                top, left = max(1, (rows - height) // 2), max(1, (columns - width) // 2)
+                win = curses.newwin(height, width, top, left)
+                win.keypad(True)
+                win.timeout(-1)
+                text_width = max(1, width - 5)
+                visible_rows = height - 5
+                layout = layout_input_text(text, text_width)
+                cursor_row, cursor_column = input_cursor_position(layout, cursor)
+                first_row = max(0, min(first_row, max(0, len(layout) - visible_rows)))
+                if cursor_row < first_row:
+                    first_row = cursor_row
+                elif cursor_row >= first_row + visible_rows:
+                    first_row = cursor_row - visible_rows + 1
+                win.erase()
+                win.box()
+                try:
+                    win.addstr(1, 2, "시스템 프롬프트 편집", curses.A_BOLD | curses.color_pair(1))
+                    for row, (line, _, _, _) in enumerate(layout[first_row:first_row + visible_rows], 2):
+                        if line:
+                            win.addstr(row, 2, line)
+                    win.addstr(height - 3, 2, "[ 적용: Ctrl+S / F2 ]   [ 취소: Esc ]", curses.color_pair(1))
+                    win.addstr(height - 2, 2, "Enter 줄바꿈 · 방향키 이동 · Ctrl+U 전체 지우기")
+                    win.move(2 + cursor_row - first_row, min(width - 2, 2 + cursor_column))
+                except curses.error:
+                    pass
+                win.refresh()
+                try:
+                    key = read_key(win, -1)
+                except curses.error:
+                    continue
+                if key is focus_event:
+                    continue
+                if key not in (curses.KEY_UP, curses.KEY_DOWN):
+                    goal_column = None
+                if key in ("\x1b", "\x03", "\x04"):
+                    return None
+                if key in ("\x13", curses.KEY_F2):
+                    return text
+                if key == curses.KEY_RESIZE:
+                    continue
+                if key == curses.KEY_MOUSE:
+                    try:
+                        _, mx, my, _, buttons = curses.getmouse()
+                        if not buttons & (getattr(curses, "BUTTON1_CLICKED", 0) | getattr(curses, "BUTTON1_PRESSED", 0)):
+                            continue
+                        y, x = my - top, mx - left
+                        if y == height - 3:
+                            if 2 <= x < 25:
+                                return text
+                            if x >= 25:
+                                return None
+                        if 2 <= y < 2 + visible_rows and 2 <= x < width - 2:
+                            target = min(len(layout) - 1, first_row + y - 2)
+                            cursor = input_index_at_column(layout, target, max(0, x - 2))
+                    except curses.error:
+                        pass
+                    continue
+                if key in (curses.KEY_UP, curses.KEY_DOWN):
+                    target = cursor_row + (-1 if key == curses.KEY_UP else 1)
+                    if 0 <= target < len(layout):
+                        if goal_column is None:
+                            goal_column = cursor_column
+                        cursor = input_index_at_column(layout, target, goal_column)
+                    continue
+                if key == curses.KEY_LEFT:
+                    cursor = max(0, cursor - 1)
+                elif key == curses.KEY_RIGHT:
+                    cursor = min(len(text), cursor + 1)
+                elif key == curses.KEY_HOME:
+                    cursor = layout[cursor_row][1]
+                elif key == curses.KEY_END:
+                    cursor = layout[cursor_row][2]
+                elif key in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                    if cursor:
+                        text = text[:cursor - 1] + text[cursor:]
+                        cursor -= 1
+                elif key == curses.KEY_DC:
+                    text = text[:cursor] + text[cursor + 1:]
+                elif key == "\x15":
+                    text, cursor = "", 0
+                elif key in ("\n", "\r", curses.KEY_ENTER):
+                    if len(text) < 20_000:
+                        text = text[:cursor] + "\n" + text[cursor:]
+                        cursor += 1
+                elif isinstance(key, str) and key.isprintable() and len(text) < 20_000:
+                    text = text[:cursor] + key + text[cursor:]
+                    cursor += len(key)
 
         def edit_settings() -> dict[str, Any] | None:
             nonlocal status
@@ -801,6 +944,8 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                         shown = "Enter 전송 · Ctrl+J 줄바꿈" if value else "Enter 줄바꿈 · Ctrl+Enter 전송"
                     elif key in ("web_enabled", "tui_enabled"):
                         shown = "켜짐" if value else "꺼짐"
+                    elif key == "system":
+                        shown = "[Enter: 편집] " + (str(value).replace("\r", "").replace("\n", " ↵ ") if value else "<비어 있음>")
                     elif key == "api_key":
                         shown = "새 키 입력됨" if value else ("저장됨 (Ctrl+U 삭제)" if args.api_key and not clear_api_key else "미설정")
                         if clear_api_key:
@@ -822,8 +967,10 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 win.refresh()
 
                 try:
-                    key = win.get_wch()
+                    key = read_key(win, -1)
                 except curses.error:
+                    continue
+                if key is focus_event:
                     continue
                 if isinstance(key, int):
                     if key == curses.KEY_MOUSE:
@@ -893,6 +1040,13 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                         saved = save_form()
                         if saved is not None:
                             return saved
+                        continue
+                    if focus < field_count and fields[focus][0] == "system":
+                        edited = edit_system_prompt(str(values["system"]))
+                        win.touchwin()
+                        if edited is not None:
+                            values["system"] = edited
+                            message = "프롬프트 적용됨 · 설정 창에서 저장해야 파일에 반영됩니다."
                         continue
                     if focus < field_count and fields[focus][0] in ("web_enabled", "enter_sends", "tui_enabled"):
                         field_key = fields[focus][0]
@@ -1134,8 +1288,10 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 screen.refresh()
 
             try:
-                key = screen.get_wch()
+                key = read_key(screen, 80)
             except curses.error:
+                continue
+            if key is focus_event:
                 continue
             if key not in (curses.KEY_UP, curses.KEY_DOWN):
                 vertical_goal_x = None
@@ -1183,6 +1339,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     cursor = 0
                     continue
                 if key == curses.KEY_RESIZE:
+                    screen.clearok(True)
                     continue
                 if key in (curses.KEY_LEFT,):
                     cursor = max(0, cursor - 1)
@@ -1281,10 +1438,18 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
         locale.setlocale(locale.LC_ALL, "")
     except locale.Error:
         pass
+    focus_reporting = sys.stdout.isatty()
     try:
+        if focus_reporting:
+            sys.stdout.write("\x1b[?1004h")
+            sys.stdout.flush()
         return curses.wrapper(tui)
     except KeyboardInterrupt:
         return 0
+    finally:
+        if focus_reporting:
+            sys.stdout.write("\x1b[?1004l")
+            sys.stdout.flush()
 
 
 def main() -> int:
