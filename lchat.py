@@ -10,7 +10,6 @@ import math
 import os
 import queue
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -490,6 +489,28 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             curses.set_escdelay(35)
 
         focus_event = object()
+        # Multiplexers may reattach without forwarding focus or SIGWINCH.
+        repaint_interval = 5.0 if os.environ.get("HERDR_ENV") == "1" else None
+        last_repaint = time.monotonic()
+
+        def sync_terminal() -> bool:
+            nonlocal last_repaint
+            repaint = False
+            try:
+                size = os.get_terminal_size(sys.stdin.fileno())
+                if size.lines > 0 and size.columns > 0 and screen.getmaxyx() != (size.lines, size.columns):
+                    curses.resizeterm(size.lines, size.columns)
+                    screen.clearok(True)
+                    repaint = True
+            except (OSError, ValueError, curses.error):
+                pass
+            now = time.monotonic()
+            if repaint_interval is not None and now - last_repaint >= repaint_interval:
+                screen.redrawwin()
+                repaint = True
+            if repaint:
+                last_repaint = now
+            return repaint
 
         def read_key(window: Any, timeout: int) -> Any:
             """Consume terminal focus reports without inserting their bytes as text."""
@@ -631,6 +652,8 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             selected = available.index(current) if current in available else 0
             first = 0
             while True:
+                if sync_terminal():
+                    screen.refresh()
                 rows, columns = screen.getmaxyx()
                 if rows < 10 or columns < 30:
                     return None
@@ -639,7 +662,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 top, left = (rows - height) // 2, (columns - width) // 2
                 win = curses.newwin(height, width, top, left)
                 win.keypad(True)
-                win.timeout(-1)
+                win.timeout(250)
                 visible = height - 4
                 first = max(0, min(first, max(0, len(available) - visible)))
                 if selected < first:
@@ -663,7 +686,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 label(height - 2, f"↑/↓ 선택 · Enter 확인 · Esc 취소  ({selected + 1}/{len(available)})")
                 win.refresh()
                 try:
-                    key = read_key(win, -1)
+                    key = read_key(win, 250)
                 except curses.error:
                     continue
                 if key is focus_event:
@@ -697,6 +720,8 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             first_row = 0
             goal_column: int | None = None
             while True:
+                if sync_terminal():
+                    screen.refresh()
                 rows, columns = screen.getmaxyx()
                 if rows < 16 or columns < 50:
                     return None
@@ -704,7 +729,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 top, left = max(1, (rows - height) // 2), max(1, (columns - width) // 2)
                 win = curses.newwin(height, width, top, left)
                 win.keypad(True)
-                win.timeout(-1)
+                win.timeout(250)
                 text_width = max(1, width - 5)
                 visible_rows = height - 5
                 layout = layout_input_text(text, text_width)
@@ -728,7 +753,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     pass
                 win.refresh()
                 try:
-                    key = read_key(win, -1)
+                    key = read_key(win, 250)
                 except curses.error:
                     continue
                 if key is focus_event:
@@ -801,7 +826,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             left = max(1, (columns - width) // 2)
             win = curses.newwin(height, width, top, left)
             win.keypad(True)
-            win.timeout(-1)
+            win.timeout(250)
             fields = [
                 ("endpoint", "Endpoint", args.endpoint),
                 ("model", "Model ID", args.model),
@@ -880,7 +905,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 win.refresh()
                 try:
                     completion_url(endpoint)
-                    from webchat import fetch_models_response, parse_available_models
+                    from lchat_web import fetch_models_response, parse_available_models
                     check_config = {"endpoint": endpoint, "model": model, "api_key": key, "timeout": timeout}
                     available = parse_available_models(fetch_models_response(check_config))
                     if model not in available:
@@ -925,6 +950,24 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             except curses.error:
                 pass
             while True:
+                resized = sync_terminal()
+                new_rows, new_columns = screen.getmaxyx()
+                if new_rows < 16 or new_columns < 50:
+                    status = "설정 창을 열려면 터미널을 50x16 이상으로 늘려 주세요."
+                    return None
+                new_height, new_width = min(new_rows - 2, 22), min(new_columns - 4, 96)
+                new_top, new_left = max(1, (new_rows - new_height) // 2), max(1, (new_columns - new_width) // 2)
+                if (new_height, new_width, new_top, new_left) != (height, width, top, left):
+                    height, width = new_height, new_width
+                    top, left = new_top, new_left
+                    win = curses.newwin(height, width, top, left)
+                    win.keypad(True)
+                    win.timeout(250)
+                    button_y, status_y, hint_y = height - 4, height - 3, height - 2
+                    save_x = max(2, (width - terminal_cell_width(save_text) - terminal_cell_width(cancel_text) - 5) // 2)
+                    cancel_x = save_x + terminal_cell_width(save_text) + 4
+                if resized:
+                    screen.refresh()
                 win.erase()
                 win.box()
                 try:
@@ -967,7 +1010,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 win.refresh()
 
                 try:
-                    key = read_key(win, -1)
+                    key = read_key(win, 250)
                 except curses.error:
                     continue
                 if key is focus_event:
@@ -1008,7 +1051,8 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     elif key == curses.KEY_BACKSPACE:
                         key = "\x7f"
                     elif key == curses.KEY_RESIZE:
-                        return None
+                        screen.clearok(True)
+                        continue
                     else:
                         continue
                 if key == "\x1b":
@@ -1132,7 +1176,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             snapshot = {"endpoint": args.endpoint, "model": args.model, "api_key": args.api_key, "timeout": min(args.timeout, 8)}
             def worker() -> None:
                 try:
-                    from webchat import fetch_models_response, parse_available_models
+                    from lchat_web import fetch_models_response, parse_available_models
                     available = parse_available_models(fetch_models_response(snapshot))
                     events.put(("models", (snapshot["endpoint"], snapshot["model"], available, force_selection)))
                 except Exception as error:
@@ -1209,6 +1253,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     busy = False
                     status = f"API 오류: {value}"
 
+            sync_terminal()
             screen.erase()
             rows, columns = screen.getmaxyx()
             input_cells = max(1, columns - 7)
@@ -1498,7 +1543,7 @@ def main() -> int:
         if value is not None:
             config[key] = value
     if config.get("port") is not None and not args.terminal_only and not args.plain:
-        command = [sys.executable, str(Path(__file__).resolve().parent / "webchat.py"), "--config", str(config_path)]
+        command = [sys.executable, str(Path(__file__).resolve().parent / "lchat_web.py"), "--config", str(config_path)]
         for key in ("endpoint", "model", "system", "host", "port", "timeout", "temperature", "max_tokens"):
             value = getattr(args, key)
             if value is not None:
@@ -1512,7 +1557,7 @@ def main() -> int:
         child_env = os.environ.copy()
         if args.api_key is not None:
             child_env["OPENAI_API_KEY"] = args.api_key
-        return subprocess.call(command, env=child_env)
+        os.execvpe(sys.executable, command, child_env)
     if args.no_tui:
         args.plain = True
     try:

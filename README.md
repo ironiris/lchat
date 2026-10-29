@@ -8,14 +8,14 @@ OpenAI 호환 Chat Completions API를 사용하는 텍스트 챗봇입니다. �
 
 ```bash
 cd ~/lchat
-python3 webchat.py --port 8078 --host 0.0.0.0 \
+python3 lchat.py --port 8078 --host 0.0.0.0 \
   --endpoint http://localhost:8070/v1 \
   --model Qwen3.8FN
 ```
 
 시작 시 endpoint의 `GET /models`와 모델 ID를 확인한 다음 host/port에 바인딩합니다. 모델이 없거나 서버에 연결할 수 없으면 경고 후 UI를 실행해 설정을 고칠 수 있습니다. 포트 바인딩에 실패하면 실행을 중단합니다. 정상 실행 후 `http://서버IP:8078`에서 사용할 수 있습니다. 같은 PC에서만 쓸 때는 `--host 127.0.0.1`을 사용하세요.
 
-`webchat.py` 또는 `lchat.py`에 `--port`를 지정하면 웹 UI를 실행합니다. 대화형 터미널에서는 설정의 **TUI 실행**이 켜져 있으면 TUI도 함께 뜹니다. `--no-tui`로 웹 전용 실행을 강제하거나, `--tui`로 TUI를 강제할 수 있습니다. 설정 파일의 `port`와 `tui_enabled`도 실행 방식을 결정합니다. 두 UI 실행 여부는 TUI 설정창 또는 웹 설정 팝업에서 각각 바꿀 수 있습니다. `--port`와 설정 파일의 `port`가 모두 없으면 웹 서버 없이 터미널 대화를 실행합니다. 터미널이 없는 환경에서는 웹 전용으로 실행합니다 (`--tui`는 터미널 필요). TUI를 종료하면 함께 띄운 웹 서버도 종료됩니다. 각 UI의 대화 기록은 별개입니다.
+`lchat.py`에 `--port`를 지정하면 웹 UI를 실행합니다. 대화형 터미널에서는 설정의 **TUI 실행**이 켜져 있으면 TUI도 함께 뜹니다. `--no-tui`로 웹 전용 실행을 강제하거나, `--tui`로 TUI를 강제할 수 있습니다. 설정 파일의 `port`와 `tui_enabled`도 실행 방식을 결정합니다. 두 UI 실행 여부는 TUI 설정창 또는 웹 설정 팝업에서 각각 바꿀 수 있습니다. `--port`와 설정 파일의 `port`가 모두 없으면 웹 서버 없이 터미널 대화를 실행합니다. 터미널이 없는 환경에서는 웹 전용으로 실행합니다 (`--tui`는 터미널 필요). TUI를 종료하면 함께 띄운 웹 서버도 종료됩니다. 각 UI의 대화 기록은 별개입니다.
 
 ```bash
 python3 lchat.py --port 8078 --tui     # TUI + 웹 UI
@@ -26,11 +26,9 @@ python3 lchat.py --plain               # 웹 없이 줄 단위 터미널 UI
 환경 설정 파일의 전체 경로만 확인하려면 다음처럼 실행하세요. 파일이 아직 없어도 경로만 출력하고 종료합니다.
 
 ```bash
-python3 webchat.py --cfg
-# 사용자 지정 설정 파일을 쓸 때
-python3 webchat.py --config /path/to/config.json --cfg
-# 터미널 챗봇에서도 동일
 python3 lchat.py --cfg
+# 사용자 지정 설정 파일을 쓸 때
+python3 lchat.py --config /path/to/config.json --cfg
 ```
 
 ### 환경 설정 팝업 및 저장
@@ -67,7 +65,7 @@ python3 lchat.py --endpoint http://localhost:8070/v1 --model Qwen3.8FN
 
 TUI 설정에서 **System prompt**를 선택하고 Enter를 누르면 여러 줄 편집 창이 열립니다. Enter로 줄을 바꾸고 Ctrl+S 또는 F2로 적용하거나 Esc로 취소할 수 있습니다. 편집 내용을 파일에 반영하려면 돌아간 설정 창에서도 **저장**해야 합니다.
 
-터미널이 포커스 이벤트를 지원하면 다른 화면에서 돌아올 때 TUI를 다시 그립니다. 화면이 깨진 경우 **Ctrl+L**로 수동 새로고침할 수 있습니다. 모델 선택과 설정 팝업에서도 동작합니다.
+터미널이 포커스 이벤트를 지원하면 다른 화면에서 돌아올 때 TUI를 다시 그립니다. 터미널 크기도 확인하며, Herdr 안에서는 재접속 복원을 위해 주기적으로 화면을 새로 그립니다. 화면이 깨진 경우 **Ctrl+L**로 수동 새로고침할 수 있습니다. 모델 선택과 설정 팝업에서도 동작합니다.
 
 TUI 시작 시 `--model`을 생략하거나 지정한 모델이 서버 목록에 없으면 모델 선택 팝업이 나타납니다. 설정 파일에 저장된 모델이 목록에 있으면 미리 선택되므로 Enter로 바로 확인할 수 있습니다. F4로 모델 목록을 다시 열 수 있습니다. 이 팝업에서 선택한 모델은 현재 실행에 적용되며, 다음 실행에도 사용하려면 F2 설정에서 저장하세요. F2 설정 저장 시에도 모델 ID가 없거나 잘못되면 목록에서 선택할 수 있습니다.
 
@@ -75,9 +73,9 @@ TUI 시작 시 `--model`을 생략하거나 지정한 모델이 서버 목록에
 
 ```bash
 python3 lchat.py --reset
-# 또는 웹 진입점에서
-python3 webchat.py --reset
 ```
+
+기존의 `python3 webchat.py` 명령도 호환성을 위해 계속 사용할 수 있습니다. 내부 웹 서버 코드는 `lchat_web.py`에 있습니다.
 
 ## 요구사항
 
