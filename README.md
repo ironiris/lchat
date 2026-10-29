@@ -4,17 +4,27 @@
 
 ## 요구사항
 
-- Python 3.9 이상. TUI에는 Python의 `curses` 모듈과 대화형 터미널이 필요합니다.
+- Python 3.9 이상, Git, curl. 설치 시 Python `curses` 및 표준 라이브러리를 확인합니다.
+- TUI에는 대화형 터미널이 필요합니다.
 - `GET /models`와 `POST /chat/completions`를 지원하는 OpenAI 호환 모델 서버
 - 별도 패키지 설치 불필요
 
 ## 시작하기
 
+설치 스크립트를 내려받아 실행하세요.
+
 ```bash
-git clone https://github.com/ironiris/lchat.git
-cd lchat
-python3 lchat.py
+installer=$(mktemp)
+curl -fsSL https://raw.githubusercontent.com/ironiris/lchat/main/install.sh -o "$installer" && sh "$installer"
+rm -f "$installer"
+lchat
 ```
+
+스크립트가 Python·필수 표준 라이브러리·Git을 확인하고, 프로그램을 `~/.local/share/lchat`에 내려받은 뒤 `~/.local/bin/lchat` 링크를 만듭니다. root 권한이나 추가 Python 패키지는 필요하지 않습니다. 누락된 시스템 의존성은 자동으로 설치하지 않고 안내합니다. 다른 파일이나 링크가 이미 있으면 덮어쓰지 않습니다. `~/.local/bin`이 PATH에 없으면 스크립트가 설정 방법을 안내합니다.
+
+업데이트는 `git -C ~/.local/share/lchat pull --ff-only`로 할 수 있습니다. 설치 스크립트를 다시 실행하면 기존 설치는 수정하지 않습니다. 삭제하려면 `rm ~/.local/bin/lchat`과 `rm -rf ~/.local/share/lchat`을 실행하세요. 설정 파일은 별도로 유지됩니다.
+
+설치 및 명령 디렉터리는 각각 `LCHAT_INSTALL_DIR`, `LCHAT_BIN_DIR` 환경 변수로 변경할 수 있습니다. 스크립트 없이 직접 `git clone`한 뒤 `python3 lchat.py`로 실행해도 됩니다.
 
 기본 endpoint는 `http://localhost:8070/v1`이며 기본 모델은 지정되어 있지 않습니다. TUI에서 서버의 모델 목록을 확인해 선택하거나 직접 지정할 수 있습니다.
 
@@ -98,6 +108,7 @@ lchat은 모델 서버에 요청을 보내는 클라이언트입니다. GPU 선�
 
 ## 파일 구성
 
+- `install.sh`: 의존성 확인, 프로그램 다운로드 및 실행 링크 설치
 - `lchat.py`: 주 실행 파일과 터미널 UI
 - `lchat_web.py`: 웹 서버 및 설정 검증
 - `index.html`: 웹 UI
