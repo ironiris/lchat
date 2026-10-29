@@ -18,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from lchat import __version__
+
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "lchat" / "config.json"
 DEFAULTS: dict[str, Any] = {
@@ -225,7 +227,7 @@ def make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
             print(message, flush=True)
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "lchat/2.0"
+        server_version = f"lchat/{__version__}"
 
         def config_snapshot(self) -> dict[str, Any]:
             with state["lock"]:

@@ -27,6 +27,7 @@ except ImportError:
     readline = None
 
 
+__version__ = "0.1.1"
 DEFAULT_CONFIG_PATH = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "lchat" / "config.json"
 DEFAULT_SETTINGS: dict[str, Any] = {
     "endpoint": "http://localhost:8070/v1",
@@ -68,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Chat in your terminal with an OpenAI-compatible API."
     )
+    parser.add_argument("--version", action="version", version=f"lchat {__version__}")
     parser.add_argument(
         "--endpoint",
         help="API base URL (or full /chat/completions URL); env: OPENAI_BASE_URL",
