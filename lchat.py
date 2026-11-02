@@ -27,7 +27,7 @@ except ImportError:
     readline = None
 
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 DEFAULT_CONFIG_PATH = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "lchat" / "config.json"
 DEFAULT_SETTINGS: dict[str, Any] = {
     "endpoint": "http://localhost:8070/v1",
@@ -41,7 +41,26 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "timeout": 180,
     "temperature": None,
     "max_tokens": None,
+    "disable_qwen_thinking": False,
 }
+
+
+def is_qwen_model(model: str) -> bool:
+    return "qwen" in model.casefold()
+
+
+def apply_qwen_thinking_setting(payload: dict[str, Any], model: str, disable_qwen_thinking: bool) -> None:
+    if disable_qwen_thinking and is_qwen_model(model):
+        payload["enable_thinking"] = False
+
+
+def parse_bool(value: str) -> bool:
+    normalized = value.strip().casefold()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"expected true/false, got {value!r}")
 
 
 def save_settings(path: Path, settings: dict[str, Any]) -> None:
@@ -836,6 +855,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 ("system", "System prompt", args.system),
                 ("enter_sends", "Enter 동작", bool(args.enter_sends)),
                 ("tui_enabled", "TUI 실행", bool(args.tui_enabled)),
+                ("disable_qwen_thinking", "Qwen 추론 끄기", bool(args.disable_qwen_thinking)),
                 ("timeout", "Timeout seconds", str(args.timeout)),
                 ("temperature", "Temperature", "" if args.temperature is None else str(args.temperature)),
                 ("max_tokens", "Max tokens", "" if args.max_tokens is None else str(args.max_tokens)),
@@ -935,6 +955,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                         "system": str(values["system"]),
                         "enter_sends": bool(values["enter_sends"]),
                         "tui_enabled": bool(values["tui_enabled"]),
+                        "disable_qwen_thinking": bool(values["disable_qwen_thinking"]),
                         "timeout": timeout,
                         "temperature": temperature,
                         "max_tokens": max_tokens,
@@ -987,7 +1008,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     value = values[key]
                     if key == "enter_sends":
                         shown = "Enter 전송 · Ctrl+J 줄바꿈" if value else "Enter 줄바꿈 · Ctrl+Enter 전송"
-                    elif key in ("web_enabled", "tui_enabled"):
+                    elif key in ("web_enabled", "tui_enabled", "disable_qwen_thinking"):
                         shown = "켜짐" if value else "꺼짐"
                     elif key == "system":
                         shown = "[Enter: 편집] " + (str(value).replace("\r", "").replace("\n", " ↵ ") if value else "<비어 있음>")
@@ -1068,13 +1089,13 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                         if field_key == "api_key":
                             values["api_key"] = ""
                             clear_api_key = True
-                        elif field_key not in ("web_enabled", "enter_sends", "tui_enabled"):
+                        elif field_key not in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
                             values[field_key] = ""
                     continue
                 if key in ("\x7f", "\b"):
                     if focus < field_count:
                         field_key = fields[focus][0]
-                        if field_key not in ("web_enabled", "enter_sends", "tui_enabled"):
+                        if field_key not in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
                             values[field_key] = str(values[field_key])[:-1]
                             if field_key == "api_key":
                                 clear_api_key = False
@@ -1094,13 +1115,13 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                             values["system"] = edited
                             message = "프롬프트 적용됨 · 설정 창에서 저장해야 파일에 반영됩니다."
                         continue
-                    if focus < field_count and fields[focus][0] in ("web_enabled", "enter_sends", "tui_enabled"):
+                    if focus < field_count and fields[focus][0] in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
                         field_key = fields[focus][0]
                         values[field_key] = not bool(values[field_key])
                         continue
                     focus = min(cancel_focus, focus + 1)
                     continue
-                if key == " " and focus < field_count and fields[focus][0] in ("web_enabled", "enter_sends", "tui_enabled"):
+                if key == " " and focus < field_count and fields[focus][0] in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
                     field_key = fields[focus][0]
                     values[field_key] = not bool(values[field_key])
                     continue
@@ -1109,7 +1130,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     if field_key == "api_key":
                         values[field_key] = str(values[field_key]) + key
                         clear_api_key = False
-                    elif field_key not in ("web_enabled", "enter_sends", "tui_enabled"):
+                    elif field_key not in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
                         values[field_key] = str(values[field_key]) + key
 
         def activate_settings() -> None:
@@ -1126,6 +1147,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             args.system = updated["system"]
             args.enter_sends = bool(updated["enter_sends"])
             args.tui_enabled = bool(updated["tui_enabled"])
+            args.disable_qwen_thinking = bool(updated["disable_qwen_thinking"])
             args.timeout = updated["timeout"]
             args.temperature = updated["temperature"]
             args.max_tokens = updated["max_tokens"]
@@ -1466,6 +1488,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     payload["temperature"] = args.temperature
                 if args.max_tokens is not None:
                     payload["max_tokens"] = args.max_tokens
+                apply_qwen_thinking_setting(payload, args.model, args.disable_qwen_thinking)
                 streaming_raw = ""
                 streaming_text = ""
                 streaming_thinking = ""
@@ -1533,6 +1556,7 @@ def main() -> int:
         "LCHAT_TIMEOUT": ("timeout", float),
         "LCHAT_TEMPERATURE": ("temperature", float),
         "LCHAT_MAX_TOKENS": ("max_tokens", int),
+        "LCHAT_DISABLE_QWEN_THINKING": ("disable_qwen_thinking", parse_bool),
     }
     try:
         for env_name, (key, convert) in env_values.items():
@@ -1576,8 +1600,11 @@ def main() -> int:
         parser.error("enter_sends in config must be true or false.")
     if not isinstance(config["tui_enabled"], bool):
         parser.error("tui_enabled in config must be true or false.")
+    if not isinstance(config["disable_qwen_thinking"], bool):
+        parser.error("disable_qwen_thinking in config must be true or false.")
     args.enter_sends = config["enter_sends"]
     args.tui_enabled = config["tui_enabled"]
+    args.disable_qwen_thinking = config["disable_qwen_thinking"]
     args.timeout = config["timeout"]
     args.temperature = config["temperature"]
     args.max_tokens = config["max_tokens"]
@@ -1658,6 +1685,7 @@ def main() -> int:
             payload["temperature"] = args.temperature
         if args.max_tokens is not None:
             payload["max_tokens"] = args.max_tokens
+        apply_qwen_thinking_setting(payload, args.model, args.disable_qwen_thinking)
 
         print("assistant> ", end="", flush=True)
         try:

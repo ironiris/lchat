@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from lchat import __version__
+from lchat import __version__, apply_qwen_thinking_setting, parse_bool
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "lchat" / "config.json"
@@ -34,6 +34,7 @@ DEFAULTS: dict[str, Any] = {
     "timeout": 180,
     "temperature": None,
     "max_tokens": None,
+    "disable_qwen_thinking": False,
 }
 
 
@@ -178,6 +179,7 @@ def load_config(path: Path) -> dict[str, Any]:
         "LCHAT_TIMEOUT": ("timeout", float),
         "LCHAT_TEMPERATURE": ("temperature", float),
         "LCHAT_MAX_TOKENS": ("max_tokens", int),
+        "LCHAT_DISABLE_QWEN_THINKING": ("disable_qwen_thinking", parse_bool),
     }
     try:
         for env_name, (key, convert) in env_values.items():
@@ -259,6 +261,7 @@ def make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                     "timeout": config["timeout"],
                     "temperature": config["temperature"],
                     "max_tokens": config["max_tokens"],
+                    "disable_qwen_thinking": config["disable_qwen_thinking"],
                     "host": config["host"],
                     "port": config["port"],
                     "web_enabled": config["port"] is not None,
@@ -345,6 +348,11 @@ def make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                     send_json(self, 400, {"error": "tui_enabled는 true/false여야 합니다."})
                     return
                 candidate["tui_enabled"] = incoming["tui_enabled"]
+            if "disable_qwen_thinking" in incoming:
+                if not isinstance(incoming["disable_qwen_thinking"], bool):
+                    send_json(self, 400, {"error": "disable_qwen_thinking는 true/false여야 합니다."})
+                    return
+                candidate["disable_qwen_thinking"] = incoming["disable_qwen_thinking"]
             if "host" in incoming:
                 if not isinstance(incoming["host"], str):
                     send_json(self, 400, {"error": "host 값은 문자열이어야 합니다."})
@@ -420,6 +428,7 @@ def make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 "web_enabled": candidate["port"] is not None,
                 "enter_sends": candidate["enter_sends"],
                 "tui_enabled": candidate["tui_enabled"],
+                "disable_qwen_thinking": candidate["disable_qwen_thinking"],
                 "restart_required": candidate["host"] != current["host"] or candidate["port"] != current["port"] or candidate["tui_enabled"] != current["tui_enabled"],
                 "message": "Endpoint와 모델을 확인하고 설정을 저장했습니다.",
             })
@@ -447,6 +456,7 @@ def make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 payload["temperature"] = config["temperature"]
             if config["max_tokens"] is not None:
                 payload["max_tokens"] = config["max_tokens"]
+            apply_qwen_thinking_setting(payload, config["model"], config["disable_qwen_thinking"])
             headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
             if config.get("api_key"):
                 headers["Authorization"] = f"Bearer {config['api_key']}"
@@ -551,6 +561,8 @@ def main() -> int:
         parser.error("설정 파일의 enter_sends는 true/false여야 합니다.")
     if not isinstance(config.get("tui_enabled"), bool):
         parser.error("설정 파일의 tui_enabled는 true/false여야 합니다.")
+    if not isinstance(config.get("disable_qwen_thinking"), bool):
+        parser.error("설정 파일의 disable_qwen_thinking은 true/false여야 합니다.")
     launch_tui = args.tui or (config["tui_enabled"] and not args.no_tui)
     for key in ("endpoint", "model", "api_key", "system", "host", "port", "timeout", "temperature", "max_tokens"):
         value = getattr(args, key)

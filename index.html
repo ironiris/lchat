@@ -137,6 +137,7 @@
           <div class="field"><label for="temperature">Temperature (선택)</label><input id="temperature" name="temperature" type="number" min="0" max="2" step="0.1" placeholder="API 기본값"></div>
           <div class="field"><label for="max-tokens">최대 생성 토큰 (선택)</label><input id="max-tokens" name="max_tokens" type="number" min="1" step="1" placeholder="API 기본값"></div>
         </div>
+        <div class="field"><label class="check-row"><input id="disable-qwen-thinking" type="checkbox"> Qwen 추론 끄기</label><small>모델 ID에 Qwen이 포함된 경우에만 요청에 적용됩니다.</small></div>
         <div class="field"><label>입력 키 동작</label><label class="check-row"><input id="enter-sends" type="checkbox"> Enter로 전송 (끄면 Enter 줄바꿈 · Ctrl+Enter 전송)</label></div>
         <div class="field"><label>실행 UI</label><label class="check-row"><input id="tui-enabled" type="checkbox"> 터미널 TUI도 실행 (웹 호스팅과 함께 실행 가능)</label></div>
         <div class="field"><label>웹 호스팅</label><label class="check-row"><input id="web-enabled" type="checkbox"> 웹 서버 활성화 (설정 적용은 다음 실행부터)</label></div>
@@ -377,6 +378,7 @@
     document.querySelector('#timeout').value = config.timeout ?? 180;
     document.querySelector('#temperature').value = config.temperature ?? '';
     document.querySelector('#max-tokens').value = config.max_tokens ?? '';
+    document.querySelector('#disable-qwen-thinking').checked = config.disable_qwen_thinking === true;
     document.querySelector('#enter-sends').checked = config.enter_sends !== false;
     document.querySelector('#tui-enabled').checked = config.tui_enabled !== false;
     document.querySelector('#web-enabled').checked = !!config.web_enabled;
@@ -461,6 +463,7 @@
       timeout:document.querySelector('#timeout').value,
       temperature:document.querySelector('#temperature').value,
       max_tokens:document.querySelector('#max-tokens').value,
+      disable_qwen_thinking:document.querySelector('#disable-qwen-thinking').checked,
       enter_sends:document.querySelector('#enter-sends').checked,
       tui_enabled:document.querySelector('#tui-enabled').checked,
       web_enabled:document.querySelector('#web-enabled').checked,
