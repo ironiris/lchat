@@ -27,7 +27,7 @@ except ImportError:
     readline = None
 
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 DEFAULT_CONFIG_PATH = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "lchat" / "config.json"
 DEFAULT_SETTINGS: dict[str, Any] = {
     "endpoint": "http://localhost:8070/v1",
@@ -71,7 +71,8 @@ def save_settings(path: Path, settings: dict[str, Any]) -> None:
         pass
     fd, temp_name = tempfile.mkstemp(prefix=".config-", dir=path.parent)
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             json.dump(settings, file, ensure_ascii=False, indent=2)
             file.write("\n")
@@ -104,15 +105,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, help="Request timeout in seconds")
     parser.add_argument("--temperature", type=float, help="Sampling temperature (API default if omitted)")
     parser.add_argument("--max-tokens", type=int, help="Maximum generated tokens")
-    parser.add_argument("--config", help=f"JSON settings file (default: {DEFAULT_CONFIG_PATH})")
-    parser.add_argument("--cfg", action="store_true", help="Print the absolute settings-file path and exit")
+    parser.add_argument("--config", nargs="?", const="", metavar="FILE",
+                        help="Use FILE; without FILE, print the default settings-file path and exit")
     parser.add_argument("--reset", action="store_true", help="Reset settings to defaults before running")
     parser.add_argument("--no-stream", action="store_true", help="Wait for the complete answer before displaying it")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--tui", action="store_true", help="Force the full-screen ncurses terminal UI")
     mode.add_argument("--plain", action="store_true", help="Use the simple line-oriented terminal UI (without web hosting)")
     mode.add_argument("--no-tui", action="store_true", help="Disable TUI (web-only when web hosting is enabled)")
-    parser.add_argument("--terminal-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--terminal-only", action="store_true",
+                        help="Run terminal only; skip configured web hosting")
     return parser
 
 
@@ -1527,7 +1529,7 @@ def main() -> int:
     args = parser.parse_args()
     args.model_explicit = bool(args.model and args.model.strip())
     config_path = (Path(args.config).expanduser() if args.config else DEFAULT_CONFIG_PATH).resolve()
-    if args.cfg:
+    if args.config == "":
         print(config_path)
         return 0
     if args.reset:
@@ -1568,7 +1570,9 @@ def main() -> int:
         value = getattr(args, key)
         if value is not None:
             config[key] = value
-    if config.get("port") is not None and not args.terminal_only and not args.plain:
+    if os.name == "nt" and config.get("port") is not None and not args.terminal_only and not args.plain:
+        print("[info] Windows에서는 웹 호스팅을 건너뛰고 터미널 모드로 실행합니다.", file=sys.stderr)
+    if config.get("port") is not None and os.name != "nt" and not args.terminal_only and not args.plain:
         command = [sys.executable, str(Path(__file__).resolve().parent / "lchat_web.py"), "--config", str(config_path)]
         for key in ("endpoint", "model", "system", "host", "port", "timeout", "temperature", "max_tokens"):
             value = getattr(args, key)

@@ -200,7 +200,8 @@ def save_config(path: Path, config: dict[str, Any]) -> None:
     data = {key: config.get(key) for key in DEFAULTS}
     fd, temp_name = tempfile.mkstemp(prefix=".config-", dir=path.parent)
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             json.dump(data, file, ensure_ascii=False, indent=2)
             file.write("\n")
@@ -536,15 +537,15 @@ def main() -> int:
     parser.add_argument("--temperature", type=float, help="Sampling temperature; env: LCHAT_TEMPERATURE")
     parser.add_argument("--max-tokens", type=int, help="Maximum generated tokens; env: LCHAT_MAX_TOKENS")
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming in the terminal UI")
-    parser.add_argument("--config", help=f"JSON settings file (default: {DEFAULT_CONFIG_PATH})")
-    parser.add_argument("--cfg", action="store_true", help="Print the absolute settings-file path and exit")
+    parser.add_argument("--config", nargs="?", const="", metavar="FILE",
+                        help="Use FILE; without FILE, print the default settings-file path and exit")
     parser.add_argument("--reset", action="store_true", help="Reset settings to defaults before running")
     ui_mode = parser.add_mutually_exclusive_group()
     ui_mode.add_argument("--tui", action="store_true", help="Run the terminal UI too (with --port, alongside the web UI)")
     ui_mode.add_argument("--no-tui", action="store_true", help="Disable the terminal UI; use web-only when hosting")
     args = parser.parse_args()
     path = config_path_from_args(args.config)
-    if args.cfg:
+    if args.config == "":
         print(path)
         return 0
     if args.reset:

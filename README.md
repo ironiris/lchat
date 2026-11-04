@@ -1,13 +1,12 @@
 # lchat
 
-**v0.1.2** · OpenAI 호환 API를 사용하는 가벼운 터미널 채팅 클라이언트입니다. 로컬 LLM의 응답을 확인하는 용도로 만들었으며, ncurses TUI와 선택적인 웹 UI를 제공합니다. Python 표준 라이브러리만 사용합니다.
+**v0.2.0** · OpenAI 호환 API를 사용하는 가벼운 터미널 채팅 클라이언트입니다. 로컬 LLM의 응답을 확인하는 용도로 만들었으며, ncurses TUI와 선택적인 웹 UI를 제공합니다. Windows TUI에는 `windows-curses`를 사용합니다.
 
 ## 요구사항
 
-- Python 3.9 이상, Git, curl. 설치 시 Python `curses` 및 표준 라이브러리를 확인합니다.
+- Python 3.9 이상. Linux/macOS 설치에는 Git, curl 및 Python `curses`가 필요합니다. Windows 설치 스크립트는 TUI용 `windows-curses`를 선택한 Python에 설치합니다.
 - TUI에는 대화형 터미널이 필요합니다.
 - `GET /models`와 `POST /chat/completions`를 지원하는 OpenAI 호환 모델 서버
-- 별도 패키지 설치 불필요
 
 ## 시작하기
 
@@ -25,6 +24,29 @@ lchat
 업데이트는 `git -C ~/.local/share/lchat pull --ff-only`로 할 수 있습니다. 설치 스크립트를 다시 실행하면 기존 설치는 수정하지 않습니다. 삭제하려면 `rm ~/.local/bin/lchat`과 `rm -rf ~/.local/share/lchat`을 실행하세요. 설정 파일은 별도로 유지됩니다.
 
 설치 및 명령 디렉터리는 각각 `LCHAT_INSTALL_DIR`, `LCHAT_BIN_DIR` 환경 변수로 변경할 수 있습니다. 스크립트 없이 직접 `git clone`한 뒤 `python3 lchat.py`로 실행해도 됩니다.
+
+### Windows 설치 (웹 호스팅 미지원)
+
+PowerShell에서 설치 스크립트를 내려받아 실행하세요. 선택한 Python 3.9+에 `curses` 모듈이 없으면 `pip`로 `windows-curses`를 설치하고, 앱 파일을 `%LOCALAPPDATA%\lchat`에 내려받습니다. 웹 호스팅은 실행하지 않습니다.
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+$installer = Join-Path $env:TEMP "lchat-install.ps1"
+Invoke-WebRequest https://raw.githubusercontent.com/ironiris/lchat/main/install.ps1 -OutFile $installer -UseBasicParsing
+& $installer
+```
+
+특정 Python 환경에 설치하려면 먼저 해당 인터프리터를 지정하세요. 모듈은 그 Python에 설치되고, 이후에도 같은 인터프리터로 앱을 실행해야 합니다.
+
+```powershell
+$env:LCHAT_PYTHON = "C:\path\to\python.exe"
+$installer = Join-Path $env:TEMP "lchat-install.ps1"
+Invoke-WebRequest https://raw.githubusercontent.com/ironiris/lchat/main/install.ps1 -OutFile $installer -UseBasicParsing
+& $installer
+& $env:LCHAT_PYTHON "$env:LOCALAPPDATA\lchat\lchat.py" --terminal-only
+```
+
+기본 설치 후에는 설치 스크립트가 출력한 실행 명령을 사용하세요. `--terminal-only`는 저장된 웹 설정이 있어도 웹 서버를 시작하지 않습니다.
 
 기본 endpoint는 `http://localhost:8070/v1`이며 기본 모델은 지정되어 있지 않습니다. TUI에서 서버의 모델 목록을 확인해 선택하거나 직접 지정할 수 있습니다.
 
@@ -85,9 +107,9 @@ TUI의 F2 또는 웹 UI의 설정 버튼에서 endpoint, 모델 ID, API 키, 시
 설정 파일은 기본적으로 `~/.config/lchat/config.json`에 저장됩니다. `XDG_CONFIG_HOME`이 있으면 그 아래의 `lchat/config.json`을 사용합니다. API 키는 설정 파일에 저장될 수 있으므로 파일 권한을 `600`으로 제한합니다. 설정 파일을 공유하거나 Git에 올리지 마세요.
 
 ```bash
-python3 lchat.py --cfg                      # 설정 파일의 절대 경로 출력
-python3 lchat.py --config /path/config.json # 다른 설정 파일 사용
-python3 lchat.py --reset                    # 기본값으로 초기화 후 실행
+python3 lchat.py --config                  # 기본 설정 파일의 절대 경로 출력 후 종료
+python3 lchat.py --config /path/config.json # 지정한 설정 파일 사용
+python3 lchat.py --reset                   # 기본값으로 초기화 후 실행
 ```
 
 초기화하면 로컬 기본 endpoint, 모델 미선택, TUI 켜짐, 웹 호스팅 꺼짐 상태가 됩니다. 명령행 옵션은 환경 변수 및 설정 파일보다 우선합니다. 환경 변수로도 설정할 수 있습니다.
