@@ -5,6 +5,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Test-ExternalCommand {
+    param([string]$Executable, [string[]]$Arguments)
+    $ErrorActionPreference = 'Continue'
+    & $Executable @Arguments *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Get-ExternalCommandOutput {
+    param([string]$Executable, [string[]]$Arguments)
+    $ErrorActionPreference = 'Continue'
+    $output = & $Executable @Arguments 2>$null
+    $exitCode = $LASTEXITCODE
+    return [PSCustomObject]@{ Output = $output; ExitCode = $exitCode }
+}
+
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
         throw 'LOCALAPPDATA is not set. Specify -InstallDir explicitly.'
@@ -18,15 +33,18 @@ if ([string]::IsNullOrWhiteSpace($Python)) {
     $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
     if ($pythonCommand) {
         $candidate = $pythonCommand.Source
-        & $candidate -c 'import sys' *> $null
-        if ($LASTEXITCODE -eq 0) { $Python = $candidate }
+        if (Test-ExternalCommand -Executable $candidate -Arguments @('-c', 'import sys')) {
+            $Python = $candidate
+        }
     }
 }
 if ([string]::IsNullOrWhiteSpace($Python)) {
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        $candidate = & py -3 -c "import sys; print(sys.executable)"
-        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($candidate)) {
-            $Python = $candidate.Trim()
+    $launcher = Get-Command py -ErrorAction SilentlyContinue
+    if ($launcher) {
+        $probe = Get-ExternalCommandOutput -Executable $launcher.Source `
+            -Arguments @('-3', '-c', 'import sys; print(sys.executable)')
+        if ($probe.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($probe.Output)) {
+            $Python = ([string]$probe.Output).Trim()
         }
     }
 }
@@ -34,31 +52,47 @@ if ([string]::IsNullOrWhiteSpace($Python)) {
     throw 'Python 3.9+ was not found. Install Python, then rerun this script.'
 }
 
-$versionText = & $Python -c "import sys; print('%d.%d.%d' % sys.version_info[:3])"
-if ($LASTEXITCODE -ne 0) { throw "Could not run Python at $Python" }
-$version = [version]$versionText.Trim()
+$versionProbe = Get-ExternalCommandOutput -Executable $Python `
+    -Arguments @('-c', "import sys; print('%d.%d.%d' % sys.version_info[:3])")
+if ($versionProbe.ExitCode -ne 0) { throw "Could not run Python at $Python" }
+$versionText = ([string]$versionProbe.Output).Trim()
+$version = [version]$versionText
 if ($version -lt [version]'3.9') { throw "Python 3.9+ is required; found $version." }
 Write-Host "Using Python $version at $Python"
 
 # Install the Windows curses compatibility module into the interpreter selected above.
-& $Python -c 'import curses' *> $null
-if ($LASTEXITCODE -ne 0) {
+if (-not (Test-ExternalCommand -Executable $Python -Arguments @('-c', 'import curses'))) {
     Write-Host 'Installing windows-curses into the selected Python environment...'
-    & $Python -m pip --version *> $null
-    if ($LASTEXITCODE -ne 0) {
-        & $Python -m ensurepip --upgrade
-        if ($LASTEXITCODE -ne 0) { throw 'Could not bootstrap pip for the selected Python.' }
+    if (-not (Test-ExternalCommand -Executable $Python -Arguments @('-m', 'pip', '--version'))) {
+        $previousPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & $Python -m ensurepip --upgrade
+            $ensurepipExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousPreference
+        }
+        if ($ensurepipExitCode -ne 0) { throw 'Could not bootstrap pip for the selected Python.' }
     }
 
-    $inVenv = & $Python -c 'import sys; print(int(sys.prefix != sys.base_prefix))'
-    if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the selected Python environment.' }
+    $venvProbe = Get-ExternalCommandOutput -Executable $Python `
+        -Arguments @('-c', 'import sys; print(int(sys.prefix != sys.base_prefix))')
+    if ($venvProbe.ExitCode -ne 0) { throw 'Could not inspect the selected Python environment.' }
     $pipArgs = @('install', 'windows-curses')
-    if ($inVenv.Trim() -ne '1') { $pipArgs += '--user' }
-    & $Python -m pip @pipArgs
-    if ($LASTEXITCODE -ne 0) { throw 'Could not install windows-curses.' }
+    if (([string]$venvProbe.Output).Trim() -ne '1') { $pipArgs += '--user' }
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $Python -m pip @pipArgs
+        $pipExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    if ($pipExitCode -ne 0) { throw 'Could not install windows-curses.' }
 }
-& $Python -c 'import curses, urllib.request'
-if ($LASTEXITCODE -ne 0) { throw 'Required Python modules are still unavailable.' }
+if (-not (Test-ExternalCommand -Executable $Python -Arguments @('-c', 'import curses, urllib.request'))) {
+    throw 'Required Python modules are still unavailable.'
+}
 
 if ((Test-Path $InstallDir) -and -not $Update) {
     throw "Install directory already exists: $InstallDir. Use -Update to replace the app files."
