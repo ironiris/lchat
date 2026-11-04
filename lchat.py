@@ -669,6 +669,14 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             except curses.error:
                 pass
 
+        def refresh_after_modal() -> None:
+            try:
+                if os.name == "nt":
+                    screen.clearok(True)
+                screen.touchwin()
+            except curses.error:
+                pass
+
         def choose_model(available: list[str], current: str) -> str | None:
             if not available:
                 return None
@@ -937,6 +945,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                             message = "오류: 서버에 사용 가능한 모델이 없습니다."
                             return None
                         chosen = choose_model(available, model)
+                        refresh_after_modal()
                         win.touchwin()
                         if chosen is None:
                             message = "모델 선택을 취소했습니다."
@@ -1112,6 +1121,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                         continue
                     if focus < field_count and fields[focus][0] == "system":
                         edited = edit_system_prompt(str(values["system"]))
+                        refresh_after_modal()
                         win.touchwin()
                         if edited is not None:
                             values["system"] = edited
@@ -1141,6 +1151,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 status = "응답이 끝난 뒤 설정을 변경하세요."
                 return
             updated = edit_settings()
+            refresh_after_modal()
             if updated is None:
                 return
             args.endpoint = updated["endpoint"]
@@ -1225,7 +1236,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                             status = "서버에 사용 가능한 모델이 없습니다. F2에서 설정을 확인하세요."
                         else:
                             selected = choose_model(available, checked_model)
-                            screen.touchwin()
+                            refresh_after_modal()
                             if selected is not None:
                                 args.model = selected
                                 status = f"모델 선택: {selected} · 현재 실행에 적용 (저장: F2 설정)"
@@ -1510,7 +1521,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
         locale.setlocale(locale.LC_ALL, "")
     except locale.Error:
         pass
-    focus_reporting = sys.stdout.isatty()
+    focus_reporting = os.name != "nt" and sys.stdout.isatty()
     try:
         if focus_reporting:
             sys.stdout.write("\x1b[?1004h")

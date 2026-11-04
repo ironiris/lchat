@@ -43,10 +43,10 @@ $env:LCHAT_PYTHON = "C:\path\to\python.exe"
 $installer = Join-Path $env:TEMP "lchat-install.ps1"
 Invoke-WebRequest https://raw.githubusercontent.com/ironiris/lchat/main/install.ps1 -OutFile $installer -UseBasicParsing
 & $installer
-& $env:LCHAT_PYTHON "$env:LOCALAPPDATA\lchat\lchat.py" --terminal-only
+.\lchat.bat
 ```
 
-기본 설치 후에는 설치 스크립트가 출력한 실행 명령을 사용하세요. `--terminal-only`는 저장된 웹 설정이 있어도 웹 서버를 시작하지 않습니다.
+설치 스크립트는 실행한 PowerShell 폴더에 `lchat.bat`을 만듭니다. 그 파일이 이미 있으면 `lchat-2.bat`처럼 다른 이름을 사용합니다. 설치 후 `.\lchat.bat`을 실행하세요. 배치 파일은 웹서빙 없이 설치 당시 선택한 Python으로 TUI를 실행합니다.
 
 기본 endpoint는 `http://localhost:8070/v1`이며 기본 모델은 지정되어 있지 않습니다. TUI에서 서버의 모델 목록을 확인해 선택하거나 직접 지정할 수 있습니다.
 
