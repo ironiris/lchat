@@ -9,6 +9,7 @@ import locale
 import math
 import os
 import queue
+import re
 import shutil
 import sys
 import tempfile
@@ -275,18 +276,205 @@ def is_markdown_horizontal_rule(line: str) -> bool:
     )
 
 
+def render_latex_math(source: str, max_width: int) -> list[str]:
+    """Render display math with SymPy, falling back for a simple fraction."""
+    max_width = max(1, max_width)
+    try:
+        from sympy import pretty
+        from sympy.parsing.latex import parse_latex
+
+        if re.search(r"\\(?:propto|approx|simeq|sim|neq|leq|geq|equiv)\b", source):
+            raise ValueError("Use the plain-text fallback for relation symbols.")
+        expression = parse_latex(source.strip())
+        lines = pretty(expression, use_unicode=True, wrap_line=False).splitlines()
+    except Exception:
+        replacements = {
+            r"\lambda": "λ", r"\alpha": "α", r"\beta": "β",
+            r"\gamma": "γ", r"\pi": "π", r"\theta": "θ",
+            r"\mu": "μ", r"\sigma": "σ", r"\omega": "ω",
+            r"\propto": "∝", r"\approx": "≈", r"\simeq": "≃", r"\sim": "∼",
+            r"\neq": "≠", r"\leq": "≤", r"\geq": "≥", r"\equiv": "≡",
+            r"\times": "×", r"\cdot": "·",
+            r"\,": " ", r"\left": "", r"\right": "",
+        }
+
+        def convert_symbols(text: str) -> str:
+            for command, symbol in replacements.items():
+                text = text.replace(command, symbol)
+            superscripts = str.maketrans("0123456789+-=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾")
+            subscripts = str.maketrans("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎")
+            text = re.sub(
+                r"\^\{([0-9+\-=()]*)\}|\^([0-9+\-=()]+)",
+                lambda match: (match.group(1) or match.group(2)).translate(superscripts),
+                text,
+            )
+            return re.sub(
+                r"_\{([0-9+\-=()]*)\}|_([0-9+\-=()]+)",
+                lambda match: (match.group(1) or match.group(2)).translate(subscripts),
+                text,
+            )
+
+        fraction = re.search(r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}", source)
+        if fraction:
+            numerator = convert_symbols(fraction.group(1))
+            denominator = convert_symbols(fraction.group(2))
+            prefix = convert_symbols(source[:fraction.start()])
+            suffix = convert_symbols(source[fraction.end():])
+            fraction_width = max(3, terminal_cell_width(numerator), terminal_cell_width(denominator))
+            prefix_width = terminal_cell_width(prefix)
+
+            def pad_fraction(text: str) -> str:
+                spare = fraction_width - terminal_cell_width(text)
+                return " " * (spare // 2) + text + " " * (spare - spare // 2)
+
+            lines = [
+                prefix + pad_fraction(numerator),
+                " " * prefix_width + "─" * fraction_width,
+                " " * prefix_width + pad_fraction(denominator) + suffix,
+            ]
+            block_width = max(terminal_cell_width(line) for line in lines)
+            if block_width <= max_width:
+                padding = " " * ((max_width - block_width) // 2)
+                return [padding + line for line in lines]
+
+        plain = convert_symbols(source)
+        return wrap_for_terminal(plain, max_width)
+
+    lines = [line.rstrip() for line in lines]
+    nonempty = [line for line in lines if line]
+    if not nonempty:
+        return [""]
+    common_indent = min(len(line) - len(line.lstrip(" ")) for line in nonempty)
+    lines = [line[common_indent:] if line else "" for line in lines]
+    block_width = max(terminal_cell_width(line) for line in lines)
+    if block_width > max_width:
+        return lines
+    return [" " * ((max_width - terminal_cell_width(line)) // 2) + line for line in lines]
+
+
+def split_markdown_table_row(line: str) -> list[str] | None:
+    if "|" not in line:
+        return None
+    content = line.strip()
+    if content.startswith("|"):
+        content = content[1:]
+    if content.endswith("|"):
+        content = content[:-1]
+    return [cell.strip() for cell in content.split("|")]
+
+
+def render_markdown_table(paragraphs: list[str], start: int, max_width: int) -> tuple[list[list[tuple[str, bool]]], int] | None:
+    header = split_markdown_table_row(paragraphs[start])
+    if not header or start + 1 >= len(paragraphs):
+        return None
+    separators = split_markdown_table_row(paragraphs[start + 1])
+    if not separators or len(separators) != len(header):
+        return None
+    if not all(re.fullmatch(r":?-{3,}:?", cell) for cell in separators):
+        return None
+
+    alignments = [
+        "center" if cell.startswith(":") and cell.endswith(":")
+        else "right" if cell.endswith(":") else "left"
+        for cell in separators
+    ]
+    rows = [header]
+    next_index = start + 2
+    while next_index < len(paragraphs):
+        row = split_markdown_table_row(paragraphs[next_index])
+        if row is None or len(row) != len(header):
+            break
+        rows.append(row)
+        next_index += 1
+
+    widths = []
+    for column in range(len(header)):
+        widest = 1
+        for row in rows:
+            runs = wrap_markdown_bold(row[column], 1_000_000)[0]
+            widest = max(widest, sum(terminal_cell_width(text) for text, _ in runs))
+        widths.append(widest)
+
+    def table_width() -> int:
+        return sum(widths) + 3 * len(widths) + 1
+
+    while table_width() > max_width and max(widths) > 1:
+        widest_column = max(range(len(widths)), key=widths.__getitem__)
+        widths[widest_column] -= 1
+    if table_width() > max_width:
+        return None
+
+    def border(left: str, joint: str, right: str) -> list[tuple[str, bool]]:
+        line = "  " + left
+        for index, width in enumerate(widths):
+            line += "─" * (width + 2)
+            line += right if index == len(widths) - 1 else joint
+        return [(line, False)]
+
+    output = [border("┌", "┬", "┐")]
+    for row_index, row in enumerate(rows):
+        wrapped_cells = [wrap_markdown_bold(cell, widths[column]) for column, cell in enumerate(row)]
+        height = max(len(cell_lines) for cell_lines in wrapped_cells)
+        for line_index in range(height):
+            segments: list[tuple[str, bool]] = [("  │", False)]
+            for column, cell_lines in enumerate(wrapped_cells):
+                runs = cell_lines[line_index] if line_index < len(cell_lines) else []
+                text_width = sum(terminal_cell_width(text) for text, _ in runs)
+                spare = widths[column] - text_width
+                left_padding = spare if alignments[column] == "right" else spare // 2 if alignments[column] == "center" else 0
+                right_padding = spare - left_padding
+                segments.append((" " * (left_padding + 1), False))
+                segments.extend(runs)
+                segments.append((" " * (right_padding + 1) + "│", False))
+            output.append(segments)
+        if row_index == 0:
+            output.append(border("├", "┼", "┤"))
+    output.append(border("└", "┴", "┘"))
+    return output, next_index
+
+
 def wrap_assistant_markdown(text: str, max_width: int) -> list[tuple[list[tuple[str, bool]], str]]:
-    """Wrap assistant text and render common Markdown headings and rules."""
+    """Wrap assistant text and render common Markdown and display math."""
     max_width = max(1, max_width)
     paragraphs = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     rendered: list[tuple[list[tuple[str, bool]], str]] = []
     in_code_block = False
-    for paragraph in paragraphs:
+    in_math_block = False
+    math_lines: list[str] = []
+    skip_until = 0
+    for paragraph_index, paragraph in enumerate(paragraphs):
+        if paragraph_index < skip_until:
+            continue
+        if in_math_block:
+            if paragraph.strip() == r"\]":
+                rendered.extend(([("  " + line, False)], "math") for line in render_latex_math(" ".join(math_lines), max_width))
+                in_math_block = False
+                math_lines.clear()
+            else:
+                math_lines.append(paragraph)
+            continue
+
         is_fence = paragraph.lstrip(" \t").startswith("```")
         if in_code_block or is_fence:
             rendered.extend(([(line, False)], "body") for line in wrap_for_terminal(paragraph, max_width))
             if is_fence:
                 in_code_block = not in_code_block
+            continue
+
+        stripped = paragraph.strip()
+        if stripped == r"\[":
+            in_math_block = True
+            math_lines.clear()
+            continue
+        if stripped.startswith(r"\[") and stripped.endswith(r"\]") and len(stripped) >= 4:
+            source = stripped[2:-2]
+            rendered.extend(([("  " + line, False)], "math") for line in render_latex_math(source, max_width))
+            continue
+
+        table = render_markdown_table(paragraphs, paragraph_index, max_width)
+        if table is not None:
+            table_lines, skip_until = table
+            rendered.extend((line, "table") for line in table_lines)
             continue
 
         if is_markdown_horizontal_rule(paragraph):
@@ -295,7 +483,10 @@ def wrap_assistant_markdown(text: str, max_width: int) -> list[tuple[list[tuple[
 
         title = markdown_heading_text(paragraph)
         if title is None:
-            rendered.extend((line, "body") for line in wrap_markdown_bold(paragraph, max_width))
+            if "**" not in paragraph:
+                rendered.extend(([(line, False)], "body") for line in wrap_for_terminal(paragraph, max_width))
+            else:
+                rendered.extend((line, "body") for line in wrap_markdown_bold(paragraph, max_width))
             continue
 
         title_lines = wrap_markdown_bold(title, max(1, max_width - 4))
@@ -312,6 +503,10 @@ def wrap_assistant_markdown(text: str, max_width: int) -> list[tuple[list[tuple[
             content.append((" " * (inner_width - line_width) + " │", False))
             rendered.append((content, "box"))
         rendered.append(([(bottom, False)], "box"))
+
+    if in_math_block:
+        raw_math = "\\[\n" + "\n".join(math_lines)
+        rendered.extend(([(line, False)], "body") for line in wrap_for_terminal(raw_math, max_width))
     return rendered
 
 
@@ -1375,10 +1570,15 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 else:
                     rendered.append(([ ("LLM", False) ], curses.color_pair(1), None, "plain"))
                 for line, style in wrap_assistant_markdown(message["content"], max(1, columns - 6)):
-                    if style in ("box", "rule"):
+                    if style in ("box", "rule", "math", "table"):
                         rendered.append((line, curses.color_pair(4), None, "answer"))
                     else:
-                        rendered.append(([ ("  ", False), *line ], curses.color_pair(4), None, "answer"))
+                        content = list(line)
+                        if content and not content[0][1]:
+                            content[0] = ("  " + content[0][0], False)
+                        else:
+                            content.insert(0, ("  ", False))
+                        rendered.append((content, curses.color_pair(4), None, "answer"))
                 rendered.append(([], 0, None, "plain"))
             if busy:
                 _, inline_thinking = split_thinking_text(streaming_raw)
@@ -1393,10 +1593,15 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 dots = (".", "..", "...", "..")[int(time.monotonic() * 3) % 4]
                 rendered.append(([(f"LLM · {stage}{dots}", False)], curses.color_pair(1), None, "plain"))
                 for line, style in wrap_assistant_markdown(streaming_text, max(1, columns - 6)):
-                    if style in ("box", "rule"):
+                    if style in ("box", "rule", "math", "table"):
                         rendered.append((line, curses.color_pair(4), None, "answer"))
                     else:
-                        rendered.append(([ ("  ", False), *line ], curses.color_pair(4), None, "answer"))
+                        content = list(line)
+                        if content and not content[0][1]:
+                            content[0] = ("  " + content[0][0], False)
+                        else:
+                            content.insert(0, ("  ", False))
+                        rendered.append((content, curses.color_pair(4), None, "answer"))
             return rendered
 
         def check_models(force_selection: bool = False) -> None:
@@ -1516,7 +1721,14 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                         else:
                             segment_attr = attr | (curses.A_BOLD if bold else 0)
                         addstr(row, column, text, segment_attr)
-                        column += terminal_cell_width(text)
+                        try:
+                            actual_row, actual_column = screen.getyx()
+                        except curses.error:
+                            actual_row, actual_column = -1, column
+                        if actual_row == row and actual_column >= column:
+                            column = actual_column
+                        else:
+                            column += terminal_cell_width(text)
                     if toggle_index is not None:
                         thinking_toggle_rows[row] = toggle_index
 
@@ -1537,9 +1749,8 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     line_text = input_rows[line_index][0] if line_index < len(input_rows) else ""
                     input_y = composer_top + 1 + line_offset
                     prefix = " > " if line_index == 0 else "   "
-                    padding = max(0, input_cells - terminal_cell_width(line_text)) + 1
                     addstr(input_y, 0, "│", curses.color_pair(1))
-                    addstr(input_y, 1, prefix + line_text + " " * padding)
+                    addstr(input_y, 1, prefix + line_text)
                     addstr(input_y, columns - 2, "│", curses.color_pair(1))
                 footer = status
                 if busy:
@@ -1714,8 +1925,27 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 cursor += len(key)
                 scroll_from_bottom = 0
 
+    console_code_pages: tuple[int, int] | None = None
+    console_kernel32 = None
+    original_ctype_locale: str | None = None
+    if os.name == "nt":
+        try:
+            import ctypes
+            console_kernel32 = ctypes.windll.kernel32
+            console_code_pages = (console_kernel32.GetConsoleCP(), console_kernel32.GetConsoleOutputCP())
+            console_kernel32.SetConsoleCP(65001)
+            console_kernel32.SetConsoleOutputCP(65001)
+        except (AttributeError, OSError):
+            console_code_pages = None
+            console_kernel32 = None
     try:
         locale.setlocale(locale.LC_ALL, "")
+        if os.name == "nt":
+            original_ctype_locale = locale.setlocale(locale.LC_CTYPE)
+            try:
+                locale.setlocale(locale.LC_CTYPE, ".UTF8")
+            except locale.Error:
+                pass
     except locale.Error:
         pass
     focus_reporting = os.name != "nt" and sys.stdout.isatty()
@@ -1730,6 +1960,19 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
         if focus_reporting:
             sys.stdout.write("\x1b[?1004l")
             sys.stdout.flush()
+        if original_ctype_locale is not None:
+            try:
+                locale.setlocale(locale.LC_CTYPE, original_ctype_locale)
+            except locale.Error:
+                pass
+        if console_code_pages is not None and console_kernel32 is not None:
+            try:
+                if console_code_pages[0]:
+                    console_kernel32.SetConsoleCP(console_code_pages[0])
+                if console_code_pages[1]:
+                    console_kernel32.SetConsoleOutputCP(console_code_pages[1])
+            except OSError:
+                pass
 
 
 def main() -> int:

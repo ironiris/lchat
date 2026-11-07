@@ -27,7 +27,7 @@ lchat
 
 ### Windows 설치 (웹 호스팅 미지원)
 
-PowerShell에서 설치 스크립트를 내려받아 실행하세요. 선택한 Python 3.9+에 `curses` 모듈이 없으면 `pip`로 `windows-curses`를 설치하고, 앱 파일을 `%LOCALAPPDATA%\lchat`에 내려받습니다. 웹 호스팅은 실행하지 않습니다.
+PowerShell에서 설치 스크립트를 내려받아 실행하세요. 선택한 Python 3.9+에 `curses` 모듈이 없으면 `pip`로 `windows-curses`를 설치하고, 앱 파일을 `%LOCALAPPDATA%\lchat`에 내려받습니다. 설치 경로가 이미 있으면 앱 파일을 자동 업데이트하며 설정 파일은 유지합니다. 웹 호스팅은 실행하지 않습니다.
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
@@ -124,7 +124,13 @@ export OPENAI_API_KEY="your-api-key"  # 필요한 경우에만
 
 ## 응답 표시와 측정
 
-응답 중에는 연결 대기, 추론 및 출력 상태를 표시합니다. `<thinking>` 태그나 서버의 reasoning 필드는 기본적으로 접어 두며 TUI의 표시 줄/F3 또는 웹 UI에서 펼칠 수 있습니다. 완료 후 첫 출력까지의 시간, 생성 시간, tok/s와 전체 시간을 표시합니다.
+응답 중에는 연결 대기, 추론 및 출력 상태를 표시합니다. `<thinking>` 태그나 서버의 reasoning 필드는 기본적으로 접어 두며 TUI의 표시 줄/F3 또는 웹 UI에서 펼칠 수 있습니다. 완료 후 첫 출력까지의 시간, 생성 시간, tok/s와 전체 시간을 표시합니다. TUI는 `**강조**`, `### 제목`, Markdown 표, `---` 수평선과 `\[...\]` 표시 수식을 렌더링합니다. 수식은 SymPy가 설치되어 있으면 LaTeX 파서와 pretty printer를 사용하며, 간단한 분수는 SymPy 없이도 표시합니다.
+
+SymPy의 전체 LaTeX 지원이 필요하면 다음 선택 의존성을 설치하세요.
+
+```bash
+python3 -m pip install sympy antlr4-python3-runtime==4.11.0
+```
 
 서버가 `usage.completion_tokens`를 제공하면 해당 토큰 수로 속도를 계산합니다. 제공하지 않으면 텍스트 길이 기반 추정치를 `~`로 표시합니다. 시간은 클라이언트에서 측정하므로 서버 내부 추론 시간과 다를 수 있습니다.
 

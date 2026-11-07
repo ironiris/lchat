@@ -94,8 +94,14 @@ if (-not (Test-ExternalCommand -Executable $Python -Arguments @('-c', 'import cu
     throw 'Required Python modules are still unavailable.'
 }
 
-if ((Test-Path $InstallDir) -and -not $Update) {
-    throw "Install directory already exists: $InstallDir. Use -Update to replace the app files."
+$existingInstall = Test-Path -LiteralPath $InstallDir
+if ($existingInstall -and -not (Test-Path -LiteralPath $InstallDir -PathType Container)) {
+    throw "Install path exists and is not a directory: $InstallDir"
+}
+if ($existingInstall) {
+    Write-Host "Existing installation found; updating app files in $InstallDir"
+} elseif ($Update) {
+    Write-Host "No existing installation found; installing to $InstallDir"
 }
 
 $tempDir = Join-Path ([IO.Path]::GetTempPath()) ('lchat-install-' + [guid]::NewGuid().ToString('N'))
@@ -140,7 +146,11 @@ try {
     Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "Installed lchat to $InstallDir"
+if ($existingInstall) {
+    Write-Host "Updated lchat in $InstallDir"
+} else {
+    Write-Host "Installed lchat to $InstallDir"
+}
 Write-Host 'Web hosting is disabled on Windows; the terminal UI is used.'
 Write-Host "Created launcher: $launcherPath"
 Write-Host "Run it from this folder with: .\$launcherName"
