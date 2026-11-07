@@ -198,7 +198,7 @@ def math_code_block(source: str) -> str:
     # Non-breaking spaces keep the same cell width without spurious │ glyphs.
     lines = display_math(source).split("\n")
     lines = [re.sub(r"^ +", lambda match: "\N{NO-BREAK SPACE}" * len(match.group()), line) for line in lines]
-    return "\n\n```text\n" + "\n".join(lines) + "\n```\n\n"
+    return "\n\n```lchat-math\n" + "\n".join(lines) + "\n```\n\n"
 
 
 def render_math_in_markdown(text: str) -> str:

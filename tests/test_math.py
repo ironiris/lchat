@@ -25,7 +25,7 @@ class MathTests(unittest.TestCase):
         self.assertEqual(cell_width(lines[0].split('1')[0]), bar_column)
         self.assertEqual(cell_width(lines[2].split('λ')[0]), bar_column)
         markdown = render_math_in_markdown(r'\[' + source + r'\]')
-        code = markdown.split('```text\n', 1)[1].split('\n```', 1)[0]
+        code = markdown.split('```lchat-math\n', 1)[1].split('\n```', 1)[0]
         output = StringIO()
         Console(file=output, width=80, force_terminal=False).print(Syntax(code, 'text', indent_guides=True))
         self.assertNotIn('│', output.getvalue())
@@ -49,7 +49,7 @@ class MathTests(unittest.TestCase):
     def test_common_delimiters_and_inline(self):
         for source in (r'\[x=\frac{1}{\sqrt{x}}\]', '$$x=\\frac{1}{\\sqrt{x}}$$', '\\[\nx=\\frac{1}{\\sqrt{x}}\n\\]'):
             result = render_math_in_markdown(source)
-            self.assertIn('```text', result)
+            self.assertIn('```lchat-math', result)
             self.assertIn('√x', result)
             self.assertIn('─', result)
         self.assertEqual(render_math_in_markdown(r'판별식 $b^2-4ac$ 와 \(x_1\)'), '판별식 b²-4ac 와 x₁')

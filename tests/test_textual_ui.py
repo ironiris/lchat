@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from textual.events import MouseMove, MouseScrollDown, MouseScrollUp
 
-from lchat_tui import ChatApp, Composer, ModelScreen, SettingsScreen
+from lchat_tui import ChatApp, ChatTableContent, Composer, ModelScreen, SettingsScreen, TABLE_BOX
 
 
 def arguments(path):
@@ -62,6 +62,54 @@ class TextualTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("enter")
                 await pilot.pause()
                 self.assertEqual(app.conversation, [])
+
+    async def test_chat_colors_headings_rules_math_and_tables(self):
+        def styled_response(args, url, events, payload, started):
+            content = ('평문 **강조** 와 $x^2$\n\n# 1단계 제목\n\n## 2단계 제목\n\n### 3단계 제목\n\n---\n\n***\n\n'
+                       '| A | B |\n|---|---|\n| 1 | 2 |\n\n\\[x=\\frac{1}{2}\\]\n\n```python\nprint(1)\n```')
+            events.put(('done', {'content': content, 'thinking': '', 'metrics': {
+                'first_text_seconds': .1, 'total_seconds': 1.0, 'generation_seconds': .9,
+                'tokens_per_second': 10.0, 'exact_tokens': True}}))
+        with patch('lchat_tui.fetch_models_response', return_value=b'{"data":[{"id":"test"}]}'), patch('lchat_tui.generate', side_effect=styled_response):
+            app = ChatApp(arguments('/tmp/nonexistent-lchat-config'), 'http://localhost:8070/v1/chat/completions')
+            async with app.run_test(size=(100, 50)) as pilot:
+                await pilot.pause(.2)
+                await pilot.press('x', 'enter')
+                await pilot.pause(.6)
+                chat = app.query_one('#chat')
+                self.assertEqual(chat.styles.background.hex, '#000000')
+                user = app.query_one('.user')
+                self.assertEqual(user.styles.background.hex, '#000000')
+                self.assertEqual(user.styles.color.hex, '#2E8B57')
+                self.assertEqual(user.styles.border.top[0], 'solid')
+                self.assertEqual(user.styles.border.top[1].hex, '#2E8B57')
+                markdown = app.query_one('Markdown.assistant')
+                self.assertEqual(markdown.rich_style.color.triplet.hex, '#aaaaaa')
+                self.assertEqual(markdown.get_component_rich_style('strong', partial=True).color.triplet.hex, '#ffffff')
+                for level in (1, 2, 3):
+                    heading = app.query_one(f'MarkdownH{level}')
+                    self.assertEqual(heading.styles.color.hex, '#FFFFFF')
+                    self.assertEqual(heading.styles.border.top[1].hex, '#806D20')
+                    self.assertEqual(heading.styles.border.left[1].hex, '#806D20')
+                    self.assertEqual(heading.styles.content_align_horizontal, 'left')
+                rules = list(app.query('MarkdownHorizontalRule'))
+                self.assertEqual(len(rules), 2)
+                self.assertTrue(all(rule.styles.border.bottom[1].hex == '#808080' for rule in rules))
+                math = app.query_one('MarkdownFence.math-block')
+                self.assertEqual(math.styles.border.top[1].hex, '#808080')
+                self.assertEqual(math.rich_style.color.triplet.hex, '#aaaaaa')
+                fences = list(app.query('MarkdownFence'))
+                self.assertEqual(len(fences), 2)
+                self.assertEqual(sum(fence.has_class('math-block') for fence in fences), 1)
+                table_widget = app.query_one(ChatTableContent)
+                header_style = table_widget.get_component_rich_style('markdown-table--header')
+                self.assertEqual(header_style.color.triplet.hex, '#aaaaaa')
+                self.assertFalse(header_style.bold)
+                table = table_widget.render()
+                self.assertEqual(table.box, TABLE_BOX)
+                self.assertTrue(table.show_lines)
+                self.assertEqual(TABLE_BOX.top_right, '┒')
+                self.assertEqual(TABLE_BOX.bottom, '━')
 
     async def test_composer_focus_and_compact_settings(self):
         with patch("lchat_tui.fetch_models_response", return_value=b'{"data":[{"id":"test"}]}'), patch("lchat_tui.generate", side_effect=fake_generate):

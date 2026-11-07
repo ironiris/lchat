@@ -8,15 +8,31 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rich.box import Box
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Markdown, Select, Static, TextArea
+from textual.widgets._markdown import MarkdownTableContent
 
 from lchat import apply_qwen_thinking_setting, completion_url, generate, save_settings, split_thinking_text
 from lchat_math import render_math_in_markdown
 from lchat_web import fetch_models_response, parse_available_models
+
+
+TABLE_BOX = Box("┌─┬┒\n│ │┃\n├─┼┨\n│ │┃\n├─┼┨\n├─┼┨\n│ │┃\n┕━┷┛\n")
+
+
+class ChatTableContent(MarkdownTableContent):
+    """Thin inner lines, with a heavier right and bottom outer edge."""
+
+    def render(self) -> Any:
+        table = super().render()
+        table.box = TABLE_BOX
+        table.show_lines = True
+        return table
 
 
 class ChatScroll(VerticalScroll):
@@ -258,7 +274,26 @@ class SettingsScreen(ModalScreen):
 
 class ChatApp(App):
     TITLE = "lchat"
-    CSS = """#chat { height: 1fr; padding: 0 1; } .user-row { height: auto; align-horizontal: right; margin-top: 1; } .user { width: auto; max-width: 80%; padding: 0 1; background: $primary 30%; color: $text; } .assistant { margin-top: 1; } #status { height: auto; color: $accent; } #composer { height: 5; border: round $primary; }"""
+    CSS = """
+    #chat { height: 1fr; padding: 0 1; background: #000000; color: #aaaaaa; }
+    .user-row { height: auto; align-horizontal: right; margin-top: 1; }
+    .user { width: auto; max-width: 80%; padding: 0 1; border: solid #2e8b57; background: #000000; color: #2e8b57; }
+    Markdown.assistant { margin-top: 1; padding: 0 1 1 1; background: #000000; color: #aaaaaa; }
+    Markdown.assistant .strong { color: #ffffff; text-style: bold; }
+    Markdown.assistant MarkdownH1, Markdown.assistant MarkdownH2, Markdown.assistant MarkdownH3,
+    Markdown.assistant MarkdownH4, Markdown.assistant MarkdownH5, Markdown.assistant MarkdownH6 {
+        width: 100%; border: solid #806d20; padding: 0 1; content-align: left middle;
+        color: #ffffff; background: #000000; text-style: bold;
+    }
+    Markdown.assistant MarkdownHorizontalRule { height: 1; padding: 0; margin: 0; border-bottom: solid #808080; }
+    Markdown.assistant MarkdownFence.math-block { border: solid #808080; padding: 0 1; color: #aaaaaa; background: #000000; }
+    Markdown.assistant MarkdownFence.math-block Static { color: #aaaaaa; background: #000000; }
+    Markdown.assistant MarkdownTable { background: #000000; color: #aaaaaa; }
+    ChatTableContent > .markdown-table--header { color: #aaaaaa; text-style: none; }
+    ChatTableContent > .markdown-table--lines { color: #808080; }
+    #status { height: auto; color: $accent; }
+    #composer { height: 5; border: round $primary; }
+    """
     BINDINGS = [Binding("ctrl+q", "quit", "종료", priority=True), Binding("ctrl+d", "quit", "종료", priority=True, show=False), Binding("f2", "settings", "설정"), Binding("f3", "thinking", "생각"), Binding("f4", "models", "모델"), Binding("ctrl+l", "redraw", "새로고침"), Binding("pageup", "scroll_up", "위로", show=False, priority=True), Binding("pagedown", "scroll_down", "아래로", show=False, priority=True)]
 
     def __init__(self, args: Any, url: str) -> None:
@@ -356,6 +391,16 @@ class ChatApp(App):
         text = ("**생각**\n\n> " + thought.replace("\n", "\n> ") + "\n\n" if self.show_thinking and thought else "") + answer
         chat = self.query_one(ChatScroll)
         await widget.update(text or ("_생각 중…_" if thought else "_응답 대기 중…_"))
+        for fence in widget.query("MarkdownFence"):
+            if fence.lexer == "lchat-math":
+                fence.add_class("math-block")
+                fence.query_one(Static).update(Text(fence.code, no_wrap=True))
+        for old_table in list(widget.query(MarkdownTableContent)):
+            if not isinstance(old_table, ChatTableContent):
+                parent = old_table.parent
+                replacement = ChatTableContent(old_table.headers, old_table.rows)
+                await old_table.remove()
+                await parent.mount(replacement)
         if chat.follow_output:
             chat.call_after_refresh(chat.scroll_if_following)
 
