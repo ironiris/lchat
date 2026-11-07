@@ -14,10 +14,16 @@ if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
     echo '오류: Python 3.9 이상이 필요합니다.' >&2
     exit 1
 fi
-if ! python3 -c 'import curses, urllib.request, http.server' >/dev/null 2>&1; then
-    echo '오류: Python 표준 라이브러리(curses, urllib, http.server)를 사용할 수 없습니다.' >&2
-    echo 'OS의 Python 및 curses 지원 패키지를 설치한 뒤 다시 시도하세요.' >&2
+if ! python3 -c 'import urllib.request, http.server' >/dev/null 2>&1; then
+    echo '오류: 필요한 Python 표준 라이브러리를 사용할 수 없습니다.' >&2
     exit 1
+fi
+if ! python3 -c 'import textual; assert (2, 1, 2) <= tuple(map(int, textual.__version__.split(".")[:3])) < (3, 0, 0)' >/dev/null 2>&1; then
+    echo 'Textual 설치 중 (현재 사용자)...'
+    if ! python3 -m pip install --user 'textual>=2.1.2,<3'; then
+        echo '오류: Textual 설치 실패. OS 패키지 관리자나 pip로 textual>=2.1.2,<3을 설치하세요.' >&2
+        exit 1
+    fi
 fi
 if ! command -v git >/dev/null 2>&1; then
     echo '오류: 프로그램을 내려받으려면 Git을 먼저 설치하세요.' >&2
@@ -54,7 +60,7 @@ else
     trap 'exit 1' HUP INT TERM
     printf '프로그램 다운로드 중: %s\n' "$repository"
     git clone -- "$repository" "$temporary/lchat"
-    for file in lchat.py lchat_web.py index.html; do
+    for file in lchat.py lchat_tui.py lchat_math.py lchat_web.py index.html; do
         if [ ! -f "$temporary/lchat/$file" ]; then
             printf '오류: 다운로드에 필요한 파일이 없습니다: %s\n' "$file" >&2
             exit 1

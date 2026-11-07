@@ -28,7 +28,7 @@ except ImportError:
     readline = None
 
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 DEFAULT_CONFIG_PATH = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "lchat" / "config.json"
 DEFAULT_SETTINGS: dict[str, Any] = {
     "endpoint": "http://localhost:8070/v1",
@@ -110,8 +110,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Use FILE; without FILE, print the default settings-file path and exit")
     parser.add_argument("--reset", action="store_true", help="Reset settings to defaults before running")
     parser.add_argument("--no-stream", action="store_true", help="Wait for the complete answer before displaying it")
+    parser.add_argument("--log", action="store_true", help="Save raw API responses and decoded text under ./log (may contain sensitive data)")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--tui", action="store_true", help="Force the full-screen ncurses terminal UI")
+    mode.add_argument("--tui", action="store_true", help="Force the full-screen Textual terminal UI")
     mode.add_argument("--plain", action="store_true", help="Use the simple line-oriented terminal UI (without web hosting)")
     mode.add_argument("--no-tui", action="store_true", help="Disable TUI (web-only when web hosting is enabled)")
     parser.add_argument("--terminal-only", action="store_true",
@@ -662,9 +663,80 @@ def error_message(error: urllib.error.HTTPError) -> str:
     return f"HTTP {error.code} {error.reason}" + (f":\n{body}" if body else "")
 
 
-def stream_answer(response: Any) -> str:
+class ResponseLog:
+    """Opt-in response-only debug files; never records requests or headers."""
+
+    def __init__(self, directory: Path | None, streaming: bool) -> None:
+        self.directory = directory
+        self.streaming = streaming
+        self.raw: Any = None
+        self.answer: Any = None
+        self.thinking: Any = None
+        self.base: Path | None = None
+
+    def __enter__(self) -> ResponseLog:
+        if self.directory is not None:
+            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            prefix = time.strftime("response-%Y%m%d-%H%M%S-")
+            fd, filename = tempfile.mkstemp(prefix=prefix, suffix=".sse" if self.streaming else ".json", dir=self.directory)
+            self.base = Path(filename).with_suffix("")
+            self.raw = os.fdopen(fd, "wb")
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        for file in (self.raw, self.answer, self.thinking):
+            if file is not None:
+                file.close()
+
+    def _append(self, kind: str, value: Any) -> None:
+        if not self.base:
+            return
+        if isinstance(value, list):
+            for item in value:
+                self._append(kind, item)
+            return
+        if isinstance(value, dict):
+            self._append(kind, value.get("text", value.get("content", "")))
+            return
+        if not isinstance(value, str) or not value:
+            return
+        file = getattr(self, kind)
+        if file is None:
+            fd = os.open(str(self.base) + f".{kind}.txt", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            file = os.fdopen(fd, "w", encoding="utf-8")
+            setattr(self, kind, file)
+        file.write(value)
+        file.flush()
+
+    def write(self, data: bytes) -> None:
+        if self.raw is None:
+            return
+        self.raw.write(data)
+        self.raw.flush()
+        try:
+            if self.streaming:
+                line = data.decode("utf-8").strip()
+                if not line.startswith("data:") or line[5:].strip() == "[DONE]":
+                    return
+                event = json.loads(line[5:].strip())
+            else:
+                event = json.loads(data.decode("utf-8"))
+            choices = event.get("choices") or []
+            if not choices:
+                return
+            message = choices[0].get("delta" if self.streaming else "message") or {}
+            self._append("answer", message.get("content"))
+            for key in ("reasoning_content", "reasoning", "thinking", "analysis"):
+                self._append("thinking", message.get(key))
+        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError, TypeError, IndexError):
+            pass  # Preserve malformed/unrecognized data in the raw log.
+
+
+def stream_answer(response: Any, log: ResponseLog | None = None) -> str:
     pieces: list[str] = []
     for raw_line in response:
+        if log:
+            log.write(raw_line)
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line or line.startswith(":") or not line.startswith("data:"):
             continue
@@ -694,13 +766,15 @@ def stream_answer(response: Any) -> str:
     return "".join(pieces)
 
 
-def complete(url: str, payload: dict[str, Any], api_key: str, timeout: float) -> str:
+def complete(url: str, payload: dict[str, Any], api_key: str, timeout: float, log_dir: Path | None = None) -> str:
     request = make_request(url, payload, api_key)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response, ResponseLog(log_dir, bool(payload.get("stream"))) as log:
             if payload.get("stream"):
-                return stream_answer(response)
-            result = json.loads(response.read().decode("utf-8"))
+                return stream_answer(response, log)
+            body = response.read()
+            log.write(body)
+            result = json.loads(body.decode("utf-8"))
     except urllib.error.HTTPError as error:
         raise RuntimeError(error_message(error)) from None
     except urllib.error.URLError as error:
@@ -725,96 +799,71 @@ def complete(url: str, payload: dict[str, Any], api_key: str, timeout: float) ->
     return content
 
 
-def run_tui(args: argparse.Namespace, url: str) -> int:
-    import curses
+def generate(args: argparse.Namespace, url: str, events: queue.Queue, payload: dict[str, Any], request_started_at: float) -> None:
+    pieces: list[str] = []
+    reasoning_parts: list[str] = []
+    all_text_parts: list[str] = []
+    first_text_seconds: float | None = None
+    completion_tokens: int | None = None
 
-    events: queue.Queue[tuple[str, Any]] = queue.Queue()
-    conversation: list[dict[str, Any]] = []
+    def text_parts(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value] if value else []
+        if isinstance(value, list):
+            return [part for item in value for part in text_parts(item)]
+        if isinstance(value, dict):
+            text_fields = ("text", "content", "arguments", "reasoning_content", "reasoning", "thinking", "analysis", "refusal", "tool_calls", "function", "name")
+            return [part for key in text_fields if key in value for part in text_parts(value[key])]
+        return []
 
-    def generate(payload: dict[str, Any], request_started_at: float) -> None:
-        pieces: list[str] = []
-        reasoning_parts: list[str] = []
-        all_text_parts: list[str] = []
-        first_text_seconds: float | None = None
-        completion_tokens: int | None = None
+    def note_first_text(parts: list[str]) -> None:
+        nonlocal first_text_seconds
+        if parts and first_text_seconds is None:
+            first_text_seconds = max(0.0, time.monotonic() - request_started_at)
+            events.put(("first_text", first_text_seconds))
 
-        def text_parts(value: Any) -> list[str]:
-            if isinstance(value, str):
-                return [value] if value else []
-            if isinstance(value, list):
-                return [part for item in value for part in text_parts(item)]
-            if isinstance(value, dict):
-                text_fields = ("text", "content", "arguments", "reasoning_content", "reasoning", "thinking", "analysis", "refusal", "tool_calls", "function", "name")
-                return [part for key in text_fields if key in value for part in text_parts(value[key])]
-            return []
-
-        def note_first_text(parts: list[str]) -> None:
-            nonlocal first_text_seconds
-            if parts and first_text_seconds is None:
-                first_text_seconds = max(0.0, time.monotonic() - request_started_at)
-                events.put(("first_text", first_text_seconds))
-
+    try:
+        request_payload = payload.copy()
+        if request_payload.get("stream"):
+            request_payload["stream_options"] = {"include_usage": True}
+        request = make_request(url, request_payload, args.api_key)
         try:
-            request_payload = payload.copy()
-            if request_payload.get("stream"):
-                request_payload["stream_options"] = {"include_usage": True}
-            request = make_request(url, request_payload, args.api_key)
-            try:
+            response_context = urllib.request.urlopen(request, timeout=args.timeout)
+        except urllib.error.HTTPError as error:
+            if request_payload.get("stream_options") and error.code in (400, 422):
+                error.close()
+                request_payload.pop("stream_options", None)
+                request = make_request(url, request_payload, args.api_key)
                 response_context = urllib.request.urlopen(request, timeout=args.timeout)
-            except urllib.error.HTTPError as error:
-                if request_payload.get("stream_options") and error.code in (400, 422):
-                    error.close()
-                    request_payload.pop("stream_options", None)
-                    request = make_request(url, request_payload, args.api_key)
-                    response_context = urllib.request.urlopen(request, timeout=args.timeout)
-                else:
-                    raise
-            with response_context as response:
-                events.put(("connected", None))
-                if payload["stream"]:
-                    for raw_line in response:
-                        line = raw_line.decode("utf-8", errors="replace").strip()
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if data == "[DONE]":
-                            break
-                        try:
-                            event = json.loads(data)
-                        except json.JSONDecodeError:
-                            continue
-                        usage = event.get("usage")
-                        if isinstance(usage, dict) and isinstance(usage.get("completion_tokens"), int):
-                            completion_tokens = usage["completion_tokens"]
-                        choices = event.get("choices") or []
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta") or {}
-                        display_parts = text_parts(delta.get("content"))
-                        all_parts: list[str] = []
-                        for field in ("content", "reasoning_content", "reasoning", "thinking", "analysis", "refusal", "tool_calls"):
-                            all_parts.extend(text_parts(delta.get(field)))
-                        reasoning_text = [part for field in ("reasoning_content", "reasoning", "thinking", "analysis") for part in text_parts(delta.get(field))]
-                        reasoning_parts.extend(reasoning_text)
-                        for thought in reasoning_text:
-                            events.put(("thinking", thought))
-                        note_first_text(all_parts)
-                        all_text_parts.extend(all_parts)
-                        for text in display_parts:
-                            pieces.append(text)
-                            events.put(("token", text))
-                else:
-                    result = json.loads(response.read().decode("utf-8"))
-                    usage = result.get("usage")
+            else:
+                raise
+        with response_context as response, ResponseLog(getattr(args, "log_dir", None), bool(payload["stream"])) as log:
+            events.put(("connected", None))
+            if payload["stream"]:
+                for raw_line in response:
+                    log.write(raw_line)
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    usage = event.get("usage")
                     if isinstance(usage, dict) and isinstance(usage.get("completion_tokens"), int):
                         completion_tokens = usage["completion_tokens"]
-                    choices = result.get("choices") or []
-                    message = choices[0].get("message") or {} if choices else {}
-                    display_parts = text_parts(message.get("content"))
+                    choices = event.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    display_parts = text_parts(delta.get("content"))
                     all_parts: list[str] = []
                     for field in ("content", "reasoning_content", "reasoning", "thinking", "analysis", "refusal", "tool_calls"):
-                        all_parts.extend(text_parts(message.get(field)))
-                    reasoning_text = [part for field in ("reasoning_content", "reasoning", "thinking", "analysis") for part in text_parts(message.get(field))]
+                        all_parts.extend(text_parts(delta.get(field)))
+                    reasoning_text = [part for field in ("reasoning_content", "reasoning", "thinking", "analysis") for part in text_parts(delta.get(field))]
                     reasoning_parts.extend(reasoning_text)
                     for thought in reasoning_text:
                         events.put(("thinking", thought))
@@ -823,1168 +872,79 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     for text in display_parts:
                         pieces.append(text)
                         events.put(("token", text))
-            completed_at = time.monotonic()
-            total_seconds = max(0.0, completed_at - request_started_at)
-            generation_seconds = max(0.0, total_seconds - first_text_seconds) if first_text_seconds is not None else 0.0
-            exact_tokens = completion_tokens is not None
-            generated_text = "".join(all_text_parts)
-            estimated_tokens = max(1, round(len(generated_text.encode("utf-8")) / 4)) if generated_text else 0
-            tokens = completion_tokens if exact_tokens else estimated_tokens
-            rate = tokens / generation_seconds if generation_seconds >= 0.01 and tokens else None
-            metrics = {
-                "first_text_seconds": first_text_seconds,
-                "total_seconds": total_seconds,
-                "generation_seconds": generation_seconds,
-                "tokens": tokens,
-                "tokens_per_second": rate,
-                "exact_tokens": exact_tokens,
-                "streaming": bool(payload.get("stream")),
-            }
-            events.put(("done", {"content": "".join(pieces), "thinking": "".join(reasoning_parts), "metrics": metrics}))
-        except urllib.error.HTTPError as error:
-            detail = error_message(error)
-            events.put(("error", detail))
-            if error.code == 404 or (error.code in (400, 422) and "model" in detail.lower()):
-                events.put(("recheck_models", None))
-        except urllib.error.URLError as error:
-            events.put(("error", f"Could not connect: {getattr(error, 'reason', error)}"))
-        except (OSError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            events.put(("error", str(error)))
-
-    def tui(screen: Any) -> int:
-        nonlocal url
-        try:
-            curses.raw()
-            curses.nonl()
-            curses.curs_set(1)
-        except curses.error:
-            pass
-        screen.keypad(True)
-        screen.timeout(80)
-        if hasattr(curses, "set_escdelay"):
-            curses.set_escdelay(35)
-
-        focus_event = object()
-        # Multiplexers may reattach without forwarding focus or SIGWINCH.
-        repaint_interval = 5.0 if os.environ.get("HERDR_ENV") == "1" else None
-        last_repaint = time.monotonic()
-
-        def sync_terminal() -> bool:
-            nonlocal last_repaint
-            repaint = False
-            try:
-                size = os.get_terminal_size(sys.stdin.fileno())
-                if size.lines > 0 and size.columns > 0 and screen.getmaxyx() != (size.lines, size.columns):
-                    curses.resizeterm(size.lines, size.columns)
-                    screen.clearok(True)
-                    repaint = True
-            except (OSError, ValueError, curses.error):
-                pass
-            now = time.monotonic()
-            if repaint_interval is not None and now - last_repaint >= repaint_interval:
-                screen.redrawwin()
-                repaint = True
-            if repaint:
-                last_repaint = now
-            return repaint
-
-        def read_key(window: Any, timeout: int) -> Any:
-            """Consume terminal focus reports without inserting their bytes as text."""
-            key = window.get_wch()
-            if isinstance(key, int) and curses.keyname(key) in (b"kxIN", b"kxOUT"):
-                if curses.keyname(key) == b"kxIN":
-                    screen.clearok(True)
-                    screen.refresh()
-                    window.touchwin()
-                return focus_event
-            if key == "\x0c":
-                screen.clearok(True)
-                screen.refresh()
-                window.touchwin()
-                return focus_event
-            if key != "\x1b":
-                return key
-            following: list[Any] = []
-            try:
-                window.timeout(35)
-                for _ in range(2):
-                    try:
-                        following.append(window.get_wch())
-                    except curses.error:
-                        break
-            finally:
-                window.timeout(timeout)
-            if following in (["[", "I"], ["[", "O"]):
-                if following[1] == "I":
-                    screen.clearok(True)
-                    screen.refresh()
-                    window.touchwin()
-                return focus_event
-            for part in reversed(following):
-                if isinstance(part, int):
-                    curses.ungetch(part)
-                else:
-                    curses.unget_wch(part)
-            return key
-        try:
-            curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
-        except curses.error:
-            pass
-        try:
-            curses.start_color()
-            curses.use_default_colors()
-            curses.init_pair(1, curses.COLOR_CYAN, -1)
-            curses.init_pair(2, curses.COLOR_GREEN, -1)
-            curses.init_pair(3, curses.COLOR_RED, -1)
-            curses.init_pair(4, curses.COLOR_WHITE, -1)
-        except curses.error:
-            pass
-
-        input_text = ""
-        cursor = 0
-        prompt_history: list[str] = []
-        history_index = 0
-        history_draft = ""
-        vertical_goal_x: int | None = None
-        scroll_from_bottom = 0
-        input_hint = "Enter 전송 · Ctrl+J 줄바꿈" if args.enter_sends else "Enter 줄바꿈 · Ctrl+Enter 전송 (Ctrl+S 대체)"
-        web_host = "localhost" if args.host in ("0.0.0.0", "::") else (args.host or "localhost")
-        web_hint = f" · Web UI http://{web_host}:{args.port}/" if args.port is not None else ""
-        status = ("설정 버튼/F2에서 모델을 선택하세요." if not args.model else f"{input_hint} · ↑/↓ 이동·경계에서 기록 · PgUp/PgDn 스크롤 · F2 설정") + web_hint
-        busy = False
-        streaming_raw = ""
-        streaming_text = ""
-        streaming_thinking = ""
-        server_connected = False
-        first_text_seconds: float | None = None
-        body_height = 1
-        settings_x = 0
-        thinking_toggle_rows: dict[int, int] = {}
-
-        def recall_history(direction: int) -> None:
-            nonlocal input_text, cursor, history_index, history_draft, status, vertical_goal_x
-            vertical_goal_x = None
-            if not prompt_history:
-                status = "입력 기록이 없습니다."
-                return
-            if direction < 0:
-                if history_index >= len(prompt_history):
-                    history_draft = input_text
-                    history_index = len(prompt_history)
-                if history_index > 0:
-                    history_index -= 1
-                    input_text = prompt_history[history_index]
-                    cursor = len(input_text)
-            elif history_index < len(prompt_history) - 1:
-                history_index += 1
-                input_text = prompt_history[history_index]
-                cursor = len(input_text)
-            elif history_index == len(prompt_history) - 1:
-                history_index = len(prompt_history)
-                input_text = history_draft
-                cursor = len(input_text)
-
-        def toggle_latest_thinking() -> None:
-            nonlocal scroll_from_bottom, status
-            for message in reversed(conversation):
-                if message["role"] == "assistant" and message.get("thinking"):
-                    message["thinking_expanded"] = not message.get("thinking_expanded", False)
-                    scroll_from_bottom = 0
-                    status = "생각을 펼쳤습니다. F3/표시 줄 클릭으로 접을 수 있습니다." if message["thinking_expanded"] else "생각을 접었습니다."
-                    return
-            status = "펼칠 생각 기록이 없습니다."
-
-        def move_vertical(direction: int, input_rows: list[tuple[str, int, int, bool]]) -> None:
-            nonlocal cursor, vertical_goal_x
-            visual_row, visual_column = input_cursor_position(input_rows, cursor)
-            target_row = visual_row + direction
-            if 0 <= target_row < len(input_rows):
-                if vertical_goal_x is None:
-                    vertical_goal_x = visual_column
-                cursor = input_index_at_column(input_rows, target_row, vertical_goal_x)
             else:
-                recall_history(direction)
+                body = response.read()
+                log.write(body)
+                result = json.loads(body.decode("utf-8"))
+                usage = result.get("usage")
+                if isinstance(usage, dict) and isinstance(usage.get("completion_tokens"), int):
+                    completion_tokens = usage["completion_tokens"]
+                choices = result.get("choices") or []
+                message = choices[0].get("message") or {} if choices else {}
+                display_parts = text_parts(message.get("content"))
+                all_parts: list[str] = []
+                for field in ("content", "reasoning_content", "reasoning", "thinking", "analysis", "refusal", "tool_calls"):
+                    all_parts.extend(text_parts(message.get(field)))
+                reasoning_text = [part for field in ("reasoning_content", "reasoning", "thinking", "analysis") for part in text_parts(message.get(field))]
+                reasoning_parts.extend(reasoning_text)
+                for thought in reasoning_text:
+                    events.put(("thinking", thought))
+                note_first_text(all_parts)
+                all_text_parts.extend(all_parts)
+                for text in display_parts:
+                    pieces.append(text)
+                    events.put(("token", text))
+        completed_at = time.monotonic()
+        total_seconds = max(0.0, completed_at - request_started_at)
+        generation_seconds = max(0.0, total_seconds - first_text_seconds) if first_text_seconds is not None else 0.0
+        exact_tokens = completion_tokens is not None
+        generated_text = "".join(all_text_parts)
+        estimated_tokens = max(1, round(len(generated_text.encode("utf-8")) / 4)) if generated_text else 0
+        tokens = completion_tokens if exact_tokens else estimated_tokens
+        rate = tokens / generation_seconds if generation_seconds >= 0.01 and tokens else None
+        metrics = {
+            "first_text_seconds": first_text_seconds,
+            "total_seconds": total_seconds,
+            "generation_seconds": generation_seconds,
+            "tokens": tokens,
+            "tokens_per_second": rate,
+            "exact_tokens": exact_tokens,
+            "streaming": bool(payload.get("stream")),
+        }
+        events.put(("done", {"content": "".join(pieces), "thinking": "".join(reasoning_parts), "metrics": metrics}))
+    except urllib.error.HTTPError as error:
+        detail = error_message(error)
+        events.put(("error", detail))
+        if error.code == 404 or (error.code in (400, 422) and "model" in detail.lower()):
+            events.put(("recheck_models", None))
+    except urllib.error.URLError as error:
+        events.put(("error", f"Could not connect: {getattr(error, 'reason', error)}"))
+    except Exception as error:
+        # Malformed or unexpected server responses must not leave the UI busy forever.
+        events.put(("error", str(error)))
 
-        def addstr(y: int, x: int, text: str, attr: int = 0, limit: int | None = None) -> None:
-            rows, cols = screen.getmaxyx()
-            if y < 0 or y >= rows or x < 0 or x >= cols:
-                return
-            clipped: list[str] = []
-            used = 0
-            available = cols - x - 1 if limit is None else min(cols - x - 1, limit)
-            for char in text:
-                width = terminal_cell_width(char)
-                if used + width > available:
-                    break
-                clipped.append(char)
-                used += width
-            try:
-                screen.addstr(y, x, "".join(clipped), attr)
-            except curses.error:
-                pass
 
-        def refresh_after_modal() -> None:
-            try:
-                if os.name == "nt":
-                    screen.clearok(True)
-                screen.touchwin()
-            except curses.error:
-                pass
 
-        def choose_model(available: list[str], current: str) -> str | None:
-            if not available:
-                return None
-            selected = available.index(current) if current in available else 0
-            first = 0
-            while True:
-                if sync_terminal():
-                    screen.refresh()
-                rows, columns = screen.getmaxyx()
-                if rows < 10 or columns < 30:
-                    return None
-                height = min(rows - 2, max(8, min(len(available) + 5, 20)))
-                width = min(columns - 2, 84)
-                top, left = (rows - height) // 2, (columns - width) // 2
-                win = curses.newwin(height, width, top, left)
-                win.keypad(True)
-                win.timeout(250)
-                visible = height - 4
-                first = max(0, min(first, max(0, len(available) - visible)))
-                if selected < first:
-                    first = selected
-                elif selected >= first + visible:
-                    first = selected - visible + 1
-                win.box()
-                def label(row: int, text: str, attr: int = 0) -> None:
-                    clipped = ""
-                    for char in text:
-                        if terminal_cell_width(clipped + char) > width - 4:
-                            break
-                        clipped += char
-                    try:
-                        win.addstr(row, 2, clipped, attr)
-                    except curses.error:
-                        pass
-                label(1, "모델 선택 · 서버에서 제공하는 모델", curses.A_BOLD | curses.color_pair(1))
-                for row, index in enumerate(range(first, min(len(available), first + visible)), 2):
-                    label(row, ("▶ " if index == selected else "  ") + available[index], curses.A_REVERSE if index == selected else 0)
-                label(height - 2, f"↑/↓ 선택 · Enter 확인 · Esc 취소  ({selected + 1}/{len(available)})")
-                win.refresh()
-                try:
-                    key = read_key(win, 250)
-                except curses.error:
-                    continue
-                if key is focus_event:
-                    continue
-                if key in ("\x1b", "\x03", "\x04"):
-                    return None
-                if key in ("\n", "\r", curses.KEY_ENTER):
-                    return available[selected]
-                if key == curses.KEY_UP:
-                    selected = max(0, selected - 1)
-                elif key == curses.KEY_DOWN:
-                    selected = min(len(available) - 1, selected + 1)
-                elif key == curses.KEY_PPAGE:
-                    selected = max(0, selected - visible)
-                elif key == curses.KEY_NPAGE:
-                    selected = min(len(available) - 1, selected + visible)
-                elif key == curses.KEY_RESIZE:
-                    continue
-                elif key == curses.KEY_MOUSE:
-                    try:
-                        _, mx, my, _, buttons = curses.getmouse()
-                        index = first + my - top - 2
-                        if left <= mx < left + width and 0 <= index < len(available) and 2 <= my - top < 2 + visible and buttons & (getattr(curses, "BUTTON1_CLICKED", 0) | getattr(curses, "BUTTON1_PRESSED", 0)):
-                            return available[index]
-                    except curses.error:
-                        pass
-
-        def edit_text_popup(initial: str, title: str, multiline: bool = False) -> str | None:
-            text = initial
-            cursor = len(text)
-            first_row = 0
-            goal_column: int | None = None
-            while True:
-                if sync_terminal():
-                    screen.refresh()
-                rows, columns = screen.getmaxyx()
-                if rows < 16 or columns < 50:
-                    return None
-                height, width = min(rows - 2, 22), min(columns - 4, 96)
-                top, left = max(1, (rows - height) // 2), max(1, (columns - width) // 2)
-                win = curses.newwin(height, width, top, left)
-                win.keypad(True)
-                win.timeout(250)
-                text_width = max(1, width - 5)
-                visible_rows = height - 5
-                layout = layout_input_text(text, text_width)
-                cursor_row, cursor_column = input_cursor_position(layout, cursor)
-                first_row = max(0, min(first_row, max(0, len(layout) - visible_rows)))
-                if cursor_row < first_row:
-                    first_row = cursor_row
-                elif cursor_row >= first_row + visible_rows:
-                    first_row = cursor_row - visible_rows + 1
-                win.erase()
-                win.box()
-                try:
-                    win.addstr(1, 2, title, curses.A_BOLD | curses.color_pair(1))
-                    for row, (line, _, _, _) in enumerate(layout[first_row:first_row + visible_rows], 2):
-                        if line:
-                            win.addstr(row, 2, line)
-                    if multiline:
-                        win.addstr(height - 3, 2, "[ 적용: Ctrl+S / F2 ]   [ 취소: Esc ]", curses.color_pair(1))
-                        win.addstr(height - 2, 2, "Enter 줄바꿈 · 방향키 · Ctrl+U 지우기")
-                    else:
-                        win.addstr(height - 3, 2, "[Enter/Ctrl+S 적용 · Esc 취소]", curses.color_pair(1))
-                        win.addstr(height - 2, 2, "방향키 이동 · Home/End · Ctrl+U 지우기")
-                    win.move(2 + cursor_row - first_row, min(width - 2, 2 + cursor_column))
-                except curses.error:
-                    pass
-                win.refresh()
-                try:
-                    key = read_key(win, 250)
-                except curses.error:
-                    continue
-                if key is focus_event:
-                    continue
-                if key not in (curses.KEY_UP, curses.KEY_DOWN):
-                    goal_column = None
-                if key in ("\x1b", "\x03", "\x04"):
-                    return None
-                if key in ("\x13", curses.KEY_F2):
-                    return text
-                if not multiline and key in ("\n", "\r", curses.KEY_ENTER):
-                    return text
-                if key == curses.KEY_RESIZE:
-                    continue
-                if key == curses.KEY_MOUSE:
-                    try:
-                        _, mx, my, _, buttons = curses.getmouse()
-                        if not buttons & (getattr(curses, "BUTTON1_CLICKED", 0) | getattr(curses, "BUTTON1_PRESSED", 0)):
-                            continue
-                        y, x = my - top, mx - left
-                        if y == height - 3:
-                            if 2 <= x < 25:
-                                return text
-                            if x >= 25:
-                                return None
-                        if 2 <= y < 2 + visible_rows and 2 <= x < width - 2:
-                            target = min(len(layout) - 1, first_row + y - 2)
-                            cursor = input_index_at_column(layout, target, max(0, x - 2))
-                    except curses.error:
-                        pass
-                    continue
-                if key in (curses.KEY_UP, curses.KEY_DOWN):
-                    target = cursor_row + (-1 if key == curses.KEY_UP else 1)
-                    if 0 <= target < len(layout):
-                        if goal_column is None:
-                            goal_column = cursor_column
-                        cursor = input_index_at_column(layout, target, goal_column)
-                    continue
-                if key == curses.KEY_LEFT:
-                    cursor = max(0, cursor - 1)
-                elif key == curses.KEY_RIGHT:
-                    cursor = min(len(text), cursor + 1)
-                elif key == curses.KEY_HOME:
-                    cursor = layout[cursor_row][1]
-                elif key == curses.KEY_END:
-                    cursor = layout[cursor_row][2]
-                elif key in (curses.KEY_BACKSPACE, "\x7f", "\b"):
-                    if cursor:
-                        text = text[:cursor - 1] + text[cursor:]
-                        cursor -= 1
-                elif key == curses.KEY_DC:
-                    text = text[:cursor] + text[cursor + 1:]
-                elif key == "\x15":
-                    text, cursor = "", 0
-                elif key in ("\n", "\r", curses.KEY_ENTER) and multiline:
-                    if len(text) < 20_000:
-                        text = text[:cursor] + "\n" + text[cursor:]
-                        cursor += 1
-                elif isinstance(key, str) and key.isprintable() and len(text) < 20_000:
-                    text = text[:cursor] + key + text[cursor:]
-                    cursor += len(key)
-
-        def edit_settings() -> dict[str, Any] | None:
-            nonlocal status
-            rows, columns = screen.getmaxyx()
-            if rows < 16 or columns < 50:
-                status = "설정 창을 열려면 터미널을 50x16 이상으로 늘려 주세요."
-                return None
-            height = min(rows - 2, 22)
-            width = min(columns - 4, 96)
-            top = max(1, (rows - height) // 2)
-            left = max(1, (columns - width) // 2)
-            win = curses.newwin(height, width, top, left)
-            win.keypad(True)
-            win.timeout(250)
-            fields = [
-                ("endpoint", "Endpoint", args.endpoint),
-                ("model", "Model ID", args.model),
-                ("api_key", "API key", ""),
-                ("system", "System prompt", args.system),
-                ("enter_sends", "Enter 동작", bool(args.enter_sends)),
-                ("tui_enabled", "TUI 실행", bool(args.tui_enabled)),
-                ("disable_qwen_thinking", "Qwen 추론", bool(args.disable_qwen_thinking)),
-                ("timeout", "Timeout seconds", str(args.timeout)),
-                ("temperature", "Temperature", "" if args.temperature is None else str(args.temperature)),
-                ("max_tokens", "Max tokens", "" if args.max_tokens is None else str(args.max_tokens)),
-                ("web_enabled", "Web UI 실행", args.port is not None),
-                ("host", "Web bind host", args.host or "127.0.0.1"),
-                ("port", "Web port", str(args.port or 8078)),
-            ]
-            values = {key: value for key, _, value in fields}
-            labels = {key: label for key, label, _ in fields}
-            clear_api_key = False
-            focus = 0
-            field_count = len(fields)
-            save_focus, cancel_focus = field_count, field_count + 1
-            message = "←/→ 값 선택 · ↑↓ 이동 · Enter 저장"
-            button_y = height - 4
-            status_y = height - 3
-            hint_y = height - 2
-            save_text, cancel_text = "[ 저장 ]", "[ 취소 ]"
-            save_x = max(2, (width - terminal_cell_width(save_text) - terminal_cell_width(cancel_text) - 5) // 2)
-            cancel_x = save_x + terminal_cell_width(save_text) + 4
-            field_rows: dict[int, int] = {}
-
-            def draw_modal_text(y: int, text: str, attr: int = 0) -> None:
-                try:
-                    win.addstr(y, 2, " " * (width - 4))
-                    clipped = []
-                    used = 0
-                    for char in text:
-                        char_width = terminal_cell_width(char)
-                        if used + char_width > width - 5:
-                            break
-                        clipped.append(char)
-                        used += char_width
-                    win.addstr(y, 2, "".join(clipped), attr)
-                except curses.error:
-                    pass
-
-            def save_form() -> dict[str, Any] | None:
-                nonlocal message, clear_api_key
-                endpoint = str(values["endpoint"]).strip()
-                model = str(values["model"]).strip()
-                if not endpoint:
-                    message = "오류: Endpoint를 입력하세요."
-                    return None
-                try:
-                    timeout = float(values["timeout"])
-                    temperature = None if str(values["temperature"]).strip() == "" else float(values["temperature"])
-                    max_tokens = None if str(values["max_tokens"]).strip() == "" else int(values["max_tokens"])
-                    web_port = int(values["port"]) if values["web_enabled"] else None
-                except (TypeError, ValueError):
-                    message = "오류: Timeout/Temperature/Max tokens/Port 숫자를 확인하세요."
-                    return None
-                if not 1 <= timeout <= 1800:
-                    message = "오류: Timeout은 1~1800초여야 합니다."
-                    return None
-                if temperature is not None and not 0 <= temperature <= 2:
-                    message = "오류: Temperature는 0~2 범위여야 합니다."
-                    return None
-                if max_tokens is not None and max_tokens < 1:
-                    message = "오류: Max tokens는 1 이상이어야 합니다."
-                    return None
-                if web_port is not None and not 1 <= web_port <= 65535:
-                    message = "오류: Web port는 1~65535 범위여야 합니다."
-                    return None
-                host = str(values["host"]).strip() or "127.0.0.1"
-                key = "" if clear_api_key else (str(values["api_key"]) or str(args.api_key or ""))
-                message = "Endpoint와 모델 확인 중…"
-                draw_modal_text(status_y, message)
-                win.refresh()
-                try:
-                    completion_url(endpoint)
-                    from lchat_web import fetch_models_response, parse_available_models
-                    check_config = {"endpoint": endpoint, "model": model, "api_key": key, "timeout": timeout}
-                    available = parse_available_models(fetch_models_response(check_config))
-                    if model not in available:
-                        if not available:
-                            message = "오류: 서버에 사용 가능한 모델이 없습니다."
-                            return None
-                        chosen = choose_model(available, model)
-                        refresh_after_modal()
-                        win.touchwin()
-                        if chosen is None:
-                            message = "모델 선택을 취소했습니다."
-                            return None
-                        model = chosen
-                        values["model"] = model
-                    path = Path(args.config_path)
-                    saved: dict[str, Any] = {}
-                    if path.exists():
-                        loaded = json.loads(path.read_text(encoding="utf-8"))
-                        if not isinstance(loaded, dict):
-                            raise ValueError("설정 파일은 JSON 객체여야 합니다.")
-                        saved = loaded
-                    saved.update({
-                        "endpoint": endpoint,
-                        "model": model,
-                        "api_key": key,
-                        "system": str(values["system"]),
-                        "enter_sends": bool(values["enter_sends"]),
-                        "tui_enabled": bool(values["tui_enabled"]),
-                        "disable_qwen_thinking": bool(values["disable_qwen_thinking"]),
-                        "timeout": timeout,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                        "host": host,
-                        "port": web_port,
-                    })
-                    save_settings(path, saved)
-                    return saved
-                except Exception as error:
-                    message = f"오류: {error}"
-                    return None
-
-            try:
-                curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
-            except curses.error:
-                pass
-            while True:
-                resized = sync_terminal()
-                new_rows, new_columns = screen.getmaxyx()
-                if new_rows < 16 or new_columns < 50:
-                    status = "설정 창을 열려면 터미널을 50x16 이상으로 늘려 주세요."
-                    return None
-                new_height, new_width = min(new_rows - 2, 22), min(new_columns - 4, 96)
-                new_top, new_left = max(1, (new_rows - new_height) // 2), max(1, (new_columns - new_width) // 2)
-                if (new_height, new_width, new_top, new_left) != (height, width, top, left):
-                    height, width = new_height, new_width
-                    top, left = new_top, new_left
-                    win = curses.newwin(height, width, top, left)
-                    win.keypad(True)
-                    win.timeout(250)
-                    button_y, status_y, hint_y = height - 4, height - 3, height - 2
-                    save_x = max(2, (width - terminal_cell_width(save_text) - terminal_cell_width(cancel_text) - 5) // 2)
-                    cancel_x = save_x + terminal_cell_width(save_text) + 4
-                if resized:
-                    screen.refresh()
-                win.erase()
-                win.box()
-                try:
-                    win.addstr(1, 2, "환경 설정", curses.A_BOLD | curses.color_pair(1))
-                except curses.error:
-                    pass
-                visible_count = max(1, button_y - 3)
-                max_first = max(0, field_count - visible_count)
-                first_field = max(0, min(focus if focus < field_count else max_first, max_first))
-                field_rows.clear()
-                for index in range(first_field, min(field_count, first_field + visible_count)):
-                    row = 2 + index - first_field
-                    field_rows[index] = row
-                    key, label, _ = fields[index]
-                    value = values[key]
-                    if key == "enter_sends":
-                        shown = "Enter 전송 · Ctrl+J 줄바꿈" if value else "Enter 줄바꿈 · Ctrl+Enter 전송"
-                    elif key == "disable_qwen_thinking":
-                        shown = "끄기" if value else "켜기"
-                    elif key in ("web_enabled", "tui_enabled"):
-                        shown = "켜기" if value else "끄기"
-                    elif key == "system":
-                        shown = "[Enter: 편집] " + (str(value).replace("\r", "").replace("\n", " ↵ ") if value else "<비어 있음>")
-                    elif key == "api_key":
-                        shown = "새 키 입력됨" if value else ("저장됨 (Ctrl+U 삭제)" if args.api_key and not clear_api_key else "미설정")
-                        if clear_api_key:
-                            shown = "삭제됨"
-                    else:
-                        shown = str(value).replace("\r", "").replace("\n", " ↵ ") if str(value) else "<API 기본값>"
-                    prefix = "▶ " if focus == index else "  "
-                    label_padding = " " * max(0, 18 - terminal_cell_width(label))
-                    line = f"{prefix}{label}{label_padding} : {shown}"
-                    attr = curses.A_REVERSE if focus == index else 0
-                    draw_modal_text(row, line, attr)
-                draw_modal_text(button_y, " " * (width - 5))
-                try:
-                    win.addstr(button_y, save_x, save_text, curses.A_REVERSE if focus == save_focus else 0)
-                    win.addstr(button_y, cancel_x, cancel_text, curses.A_REVERSE if focus == cancel_focus else 0)
-                except curses.error:
-                    pass
-                draw_modal_text(status_y, message, curses.color_pair(3) if message.startswith("오류:") else 0)
-                draw_modal_text(hint_y, f"설정 파일: {args.config_path} · UI 실행 설정은 다음 실행부터 적용")
-                win.refresh()
-
-                try:
-                    key = read_key(win, 250)
-                except curses.error:
-                    continue
-                if key is focus_event:
-                    continue
-                if isinstance(key, int):
-                    if key == curses.KEY_MOUSE:
-                        try:
-                            _, mx, my, _, bstate = curses.getmouse()
-                            if not bstate & getattr(curses, "BUTTON1_CLICKED", 0):
-                                continue
-                            rel_y, rel_x = my - top, mx - left
-                            clicked_field = next((i for i, row in field_rows.items() if row == rel_y), None)
-                            if clicked_field is not None:
-                                focus = clicked_field
-                                continue
-                            if rel_y == button_y and save_x <= rel_x < cancel_x:
-                                focus = save_focus
-                                key = "\n"
-                            elif rel_y == button_y and rel_x >= cancel_x:
-                                return None
-                            else:
-                                continue
-                        except curses.error:
-                            continue
-                    elif key == curses.KEY_F2 or key == 27:
-                        return None
-                    elif key == curses.KEY_ENTER:
-                        key = "\n"
-                    elif key == curses.KEY_UP:
-                        focus = max(0, focus - 1)
-                        continue
-                    elif key == curses.KEY_DOWN:
-                        focus = min(cancel_focus, focus + 1)
-                        continue
-                    elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
-                        if focus < field_count and fields[focus][0] in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
-                            field_key = fields[focus][0]
-                            values[field_key] = key == (curses.KEY_LEFT if field_key == "disable_qwen_thinking" else curses.KEY_RIGHT)
-                        continue
-                    elif key == curses.KEY_BTAB:
-                        focus = max(0, focus - 1)
-                        continue
-                    elif key == curses.KEY_BACKSPACE:
-                        key = "\x7f"
-                    elif key == curses.KEY_RESIZE:
-                        screen.clearok(True)
-                        continue
-                    else:
-                        continue
-                if key == "\x1b":
-                    return None
-                if key == "\t":
-                    focus = (focus + 1) % (cancel_focus + 1)
-                    continue
-                if key == "\x15":
-                    if focus < field_count:
-                        field_key = fields[focus][0]
-                        if field_key == "api_key":
-                            values["api_key"] = ""
-                            clear_api_key = True
-                        elif field_key not in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
-                            values[field_key] = ""
-                    continue
-                if key in ("\x7f", "\b"):
-                    if focus < field_count:
-                        field_key = fields[focus][0]
-                        if field_key not in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
-                            values[field_key] = str(values[field_key])[:-1]
-                            if field_key == "api_key":
-                                clear_api_key = False
-                    continue
-                if key in ("\n", "\r"):
-                    if focus == cancel_focus:
-                        return None
-                    if focus == save_focus:
-                        saved = save_form()
-                        if saved is not None:
-                            return saved
-                        continue
-                    if focus < field_count and fields[focus][0] == "system":
-                        edited = edit_text_popup(str(values["system"]), "시스템 프롬프트 편집", multiline=True)
-                        refresh_after_modal()
-                        win.touchwin()
-                        if edited is not None:
-                            values["system"] = edited
-                            message = "프롬프트 적용됨 · 설정 창에서 저장해야 파일에 반영됩니다."
-                        continue
-                    if focus < field_count:
-                        field_key = fields[focus][0]
-                        field_value = str(values[field_key])
-                        if field_key != "api_key" and len(field_value) >= 5:
-                            edited = edit_text_popup(field_value, f"{labels[field_key]} 편집")
-                            refresh_after_modal()
-                            win.touchwin()
-                            if edited is not None:
-                                values[field_key] = edited
-                                message = f"{labels[field_key]} 적용됨 · 설정 창에서 저장해야 파일에 반영됩니다."
-                            continue
-                    if focus < field_count and fields[focus][0] in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
-                        field_key = fields[focus][0]
-                        values[field_key] = not bool(values[field_key])
-                        continue
-                    focus = min(cancel_focus, focus + 1)
-                    continue
-                if key == " " and focus < field_count and fields[focus][0] in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
-                    field_key = fields[focus][0]
-                    values[field_key] = not bool(values[field_key])
-                    continue
-                if isinstance(key, str) and key.isprintable() and focus < field_count:
-                    field_key = fields[focus][0]
-                    if field_key == "api_key":
-                        values[field_key] = str(values[field_key]) + key
-                        clear_api_key = False
-                    elif field_key not in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
-                        values[field_key] = str(values[field_key]) + key
-
-        def activate_settings() -> None:
-            nonlocal url, status, scroll_from_bottom, input_hint
-            if busy:
-                status = "응답이 끝난 뒤 설정을 변경하세요."
-                return
-            updated = edit_settings()
-            refresh_after_modal()
-            if updated is None:
-                return
-            args.endpoint = updated["endpoint"]
-            args.model = updated["model"]
-            args.api_key = updated["api_key"]
-            args.system = updated["system"]
-            args.enter_sends = bool(updated["enter_sends"])
-            args.tui_enabled = bool(updated["tui_enabled"])
-            args.disable_qwen_thinking = bool(updated["disable_qwen_thinking"])
-            args.timeout = updated["timeout"]
-            args.temperature = updated["temperature"]
-            args.max_tokens = updated["max_tokens"]
-            args.host = updated["host"]
-            args.port = updated["port"]
-            url = completion_url(args.endpoint)
-            conversation.clear()
-            scroll_from_bottom = 0
-            input_hint = "Enter 전송 · Ctrl+J 줄바꿈" if args.enter_sends else "Enter 줄바꿈 · Ctrl+Enter 전송 (Ctrl+S 대체)"
-            status = f"설정 저장 완료 · {input_hint} · TUI/웹 실행 설정은 다음 실행부터 적용"
-
-        def transcript_lines(columns: int) -> list[tuple[list[tuple[str, bool]], int, int | None, str]]:
-            rendered: list[tuple[list[tuple[str, bool]], int, int | None, str]] = []
-            for message_index, message in enumerate(conversation):
-                if message["role"] == "user":
-                    rendered.extend(([(line, False)], curses.color_pair(2), None, "plain") for line in user_bubble_lines(message["content"], columns))
-                    rendered.append(([], 0, None, "plain"))
-                    continue
-                thinking = str(message.get("thinking", ""))
-                expanded = bool(message.get("thinking_expanded", False))
-                if thinking:
-                    label = "LLM · [생각 접기 · F3]" if expanded else "LLM · [생각 펼치기 · F3]"
-                    rendered.append(([(label, False)], curses.color_pair(1), message_index, "plain"))
-                    if expanded:
-                        rendered.append(([ ("  ┌─ 생각 ─", False) ], curses.color_pair(1), None, "plain"))
-                        rendered.extend(([ ("  " + line, False) ], 0, None, "plain") for line in wrap_for_terminal(thinking, max(1, columns - 8)))
-                        rendered.append(([ ("  └────────", False) ], curses.color_pair(1), None, "plain"))
-                else:
-                    rendered.append(([ ("LLM", False) ], curses.color_pair(1), None, "plain"))
-                for line, style in wrap_assistant_markdown(message["content"], max(1, columns - 6)):
-                    if style in ("box", "rule", "math", "table"):
-                        rendered.append((line, curses.color_pair(4), None, "answer"))
-                    else:
-                        content = list(line)
-                        if content and not content[0][1]:
-                            content[0] = ("  " + content[0][0], False)
-                        else:
-                            content.insert(0, ("  ", False))
-                        rendered.append((content, curses.color_pair(4), None, "answer"))
-                rendered.append(([], 0, None, "plain"))
-            if busy:
-                _, inline_thinking = split_thinking_text(streaming_raw)
-                if streaming_thinking or inline_thinking:
-                    stage = "추론 중"
-                elif streaming_text:
-                    stage = "텍스트 생성 중"
-                elif server_connected:
-                    stage = "서버 응답 연결 · 첫 텍스트 대기"
-                else:
-                    stage = "서버 연결 대기"
-                dots = (".", "..", "...", "..")[int(time.monotonic() * 3) % 4]
-                rendered.append(([(f"LLM · {stage}{dots}", False)], curses.color_pair(1), None, "plain"))
-                for line, style in wrap_assistant_markdown(streaming_text, max(1, columns - 6)):
-                    if style in ("box", "rule", "math", "table"):
-                        rendered.append((line, curses.color_pair(4), None, "answer"))
-                    else:
-                        content = list(line)
-                        if content and not content[0][1]:
-                            content[0] = ("  " + content[0][0], False)
-                        else:
-                            content.insert(0, ("  ", False))
-                        rendered.append((content, curses.color_pair(4), None, "answer"))
-            return rendered
-
-        def check_models(force_selection: bool = False) -> None:
-            snapshot = {"endpoint": args.endpoint, "model": args.model, "api_key": args.api_key, "timeout": min(args.timeout, 8)}
-            def worker() -> None:
-                try:
-                    from lchat_web import fetch_models_response, parse_available_models
-                    available = parse_available_models(fetch_models_response(snapshot))
-                    events.put(("models", (snapshot["endpoint"], snapshot["model"], available, force_selection)))
-                except Exception as error:
-                    events.put(("models_error", (snapshot["endpoint"], str(error))))
-            threading.Thread(target=worker, daemon=True).start()
-
-        check_models(force_selection=not args.model_explicit)
-        while True:
-            while True:
-                try:
-                    event, value = events.get_nowait()
-                except queue.Empty:
-                    break
-                if event == "models":
-                    endpoint, checked_model, available, force_selection = value
-                    if endpoint != args.endpoint or checked_model != args.model or busy:
-                        continue
-                    if force_selection or checked_model not in available:
-                        if not available:
-                            status = "서버에 사용 가능한 모델이 없습니다. F2에서 설정을 확인하세요."
-                        else:
-                            selected = choose_model(available, checked_model)
-                            refresh_after_modal()
-                            if selected is not None:
-                                args.model = selected
-                                status = f"모델 선택: {selected} · 현재 실행에 적용 (저장: F2 설정)"
-                            else:
-                                status = "모델 선택 취소 · F4로 목록 다시 확인"
-                elif event == "recheck_models":
-                    check_models()
-                elif event == "models_error":
-                    endpoint, detail = value
-                    if endpoint == args.endpoint and not busy:
-                        status = f"모델 목록 확인 실패: {detail} · F4 재시도"
-                elif event == "token":
-                    streaming_raw += value
-                    streaming_text, _ = split_thinking_text(streaming_raw)
-                elif event == "thinking":
-                    streaming_thinking += value
-                elif event == "connected":
-                    server_connected = True
-                elif event == "first_text":
-                    first_text_seconds = value
-                    status = f"첫 텍스트 도착 · {value:.2f}s · 응답 생성 중…"
-                elif event == "done":
-                    raw_answer = value["content"]
-                    answer, tagged_thinking = split_thinking_text(raw_answer, final=True)
-                    thinking = value.get("thinking", "") + tagged_thinking
-                    metrics = value["metrics"]
-                    conversation.append({"role": "assistant", "content": answer, "thinking": thinking, "thinking_expanded": False})
-                    streaming_raw = ""
-                    streaming_text = ""
-                    streaming_thinking = ""
-                    server_connected = False
-                    busy = False
-                    ttft = metrics["first_text_seconds"]
-                    if ttft is None:
-                        status = "응답 완료 · 출력 텍스트가 없습니다."
-                    elif not metrics["streaming"]:
-                        status = f"첫 텍스트 {ttft:.2f}s · 비스트리밍 tok/s 미측정 · 총 {metrics['total_seconds']:.2f}s · ↑/↓ 기록"
-                    else:
-                        rate = metrics["tokens_per_second"]
-                        if rate is None:
-                            rate_text = "속도 측정 불가"
-                        else:
-                            rate_text = f"{rate:.1f} tok/s" if metrics["exact_tokens"] else f"~{rate:.1f} tok/s (추정)"
-                        thought_hint = " · 생각 F3/줄 클릭" if thinking else ""
-                        status = f"첫 텍스트 {ttft:.2f}s · 생성 {metrics['generation_seconds']:.2f}s · {rate_text} · 총 {metrics['total_seconds']:.2f}s{thought_hint} · ↑/↓ 기록"
-                elif event == "error":
-                    streaming_raw = ""
-                    streaming_text = ""
-                    streaming_thinking = ""
-                    server_connected = False
-                    busy = False
-                    status = f"API 오류: {value}"
-
-            sync_terminal()
-            if os.name == "nt":
-                # PDCurses can leave stale console cells after a window repaint; force a full redraw.
-                try:
-                    screen.clearok(True)
-                except curses.error:
-                    pass
-            screen.erase()
-            rows, columns = screen.getmaxyx()
-            input_cells = max(1, columns - 7)
-            input_rows = layout_input_text(input_text, input_cells)
-            lines: list[tuple[list[tuple[str, bool]], int, int | None, str]] = []
-            thinking_toggle_rows.clear()
-            if rows < 12 or columns < 24:
-                addstr(0, 0, "터미널을 조금 더 크게 늘려 주세요. (최소 24x12)", curses.A_BOLD)
-                screen.refresh()
-            else:
-                title = f" lchat  │  {args.model}  │  {url} "
-                settings_button = " [ 설정 ] "
-                settings_x = max(0, columns - terminal_cell_width(settings_button) - 1)
-                addstr(0, 0, title, curses.A_BOLD | curses.color_pair(1), settings_x - 1)
-                addstr(0, settings_x, settings_button, curses.A_REVERSE | curses.color_pair(2))
-                try:
-                    screen.hline(1, 0, curses.ACS_HLINE, columns - 1)
-                except curses.error:
-                    pass
-                composer_top = rows - 6
-                body_start = 2
-                body_height = max(1, composer_top - body_start)
-                lines = transcript_lines(columns)
-                max_scroll = max(0, len(lines) - body_height)
-                scroll_from_bottom = min(max_scroll, max(0, scroll_from_bottom))
-                end = len(lines) - scroll_from_bottom
-                start = max(0, end - body_height)
-                for row, (segments, attr, toggle_index, line_style) in enumerate(lines[start:end], body_start):
-                    column = 0
-                    for text, bold in segments:
-                        if line_style == "answer":
-                            segment_attr = curses.color_pair(4) | (curses.A_BOLD if bold else curses.A_DIM)
-                        else:
-                            segment_attr = attr | (curses.A_BOLD if bold else 0)
-                        addstr(row, column, text, segment_attr)
-                        try:
-                            actual_row, actual_column = screen.getyx()
-                        except curses.error:
-                            actual_row, actual_column = -1, column
-                        if actual_row == row and actual_column >= column:
-                            column = actual_column
-                        else:
-                            column += terminal_cell_width(text)
-                    if toggle_index is not None:
-                        thinking_toggle_rows[row] = toggle_index
-
-                try:
-                    screen.addstr(composer_top, 0, "┌" + "─" * (columns - 3) + "┐", curses.color_pair(1))
-                    screen.addstr(composer_top + 4, 0, "└" + "─" * (columns - 3) + "┘", curses.color_pair(1))
-                except curses.error:
-                    pass
-                visual_row, visual_column = input_cursor_position(input_rows, cursor)
-                visible_start = max(0, len(input_rows) - 3)
-                if visual_row < visible_start:
-                    visible_start = visual_row
-                elif visual_row >= visible_start + 3:
-                    visible_start = visual_row - 2
-                visible_start = max(0, min(visible_start, len(input_rows) - 1))
-                for line_offset in range(3):
-                    line_index = visible_start + line_offset
-                    line_text = input_rows[line_index][0] if line_index < len(input_rows) else ""
-                    input_y = composer_top + 1 + line_offset
-                    prefix = " > " if line_index == 0 else "   "
-                    addstr(input_y, 0, "│", curses.color_pair(1))
-                    addstr(input_y, 1, prefix + line_text)
-                    addstr(input_y, columns - 2, "│", curses.color_pair(1))
-                footer = status
-                if busy:
-                    dots = (".", "..", "...", "..")[int(time.monotonic() * 3) % 4]
-                    if first_text_seconds is not None:
-                        _, inline_thinking = split_thinking_text(streaming_raw)
-                        if streaming_thinking or inline_thinking:
-                            stage = f"첫 텍스트 {first_text_seconds:.2f}s · 숨겨진 추론 중"
-                        elif streaming_text:
-                            stage = f"첫 텍스트 {first_text_seconds:.2f}s · 텍스트 출력 중"
-                        else:
-                            stage = f"첫 텍스트 {first_text_seconds:.2f}s · 응답 생성 중"
-                    elif server_connected:
-                        stage = "서버 응답 연결됨 · 추론/첫 텍스트 대기"
-                    else:
-                        stage = "서버 연결 대기"
-                    footer = f"{stage}{dots} · Ctrl+C 종료"
-                addstr(rows - 1, 0, footer, curses.color_pair(3) if status.startswith("API 오류:") else 0)
-                cursor_y = composer_top + 1 + visual_row - visible_start
-                cursor_x = min(columns - 3, 4 + visual_column)
-                try:
-                    screen.move(cursor_y, cursor_x)
-                except curses.error:
-                    pass
-                screen.refresh()
-
-            try:
-                key = read_key(screen, 80)
-            except curses.error:
-                continue
-            if key is focus_event:
-                continue
-            if key not in (curses.KEY_UP, curses.KEY_DOWN):
-                vertical_goal_x = None
-            if isinstance(key, int) and key == curses.KEY_ENTER:
-                key = "\r"
-            elif isinstance(key, int):
-                if key == curses.KEY_MOUSE:
-                    try:
-                        _, mouse_x, mouse_y, _, mouse_state = curses.getmouse()
-                        click_mask = getattr(curses, "BUTTON1_CLICKED", 0) | getattr(curses, "BUTTON1_PRESSED", 0)
-                        if mouse_y == 0 and mouse_x >= settings_x and mouse_state & click_mask:
-                            activate_settings()
-                        elif mouse_y in thinking_toggle_rows and mouse_state & click_mask:
-                            message = conversation[thinking_toggle_rows[mouse_y]]
-                            delta_rows = len(wrap_for_terminal(str(message.get("thinking", "")), max(1, columns - 8))) + 2
-                            was_expanded = bool(message.get("thinking_expanded", False))
-                            message["thinking_expanded"] = not was_expanded
-                            scroll_from_bottom = max(0, scroll_from_bottom - delta_rows) if was_expanded else scroll_from_bottom + delta_rows
-                            status = "생각을 펼쳤습니다." if message["thinking_expanded"] else "생각을 접었습니다."
-                        elif 2 <= mouse_y < rows - 6:
-                            wheel_up = getattr(curses, "BUTTON4_PRESSED", 0) | getattr(curses, "BUTTON4_CLICKED", 0)
-                            wheel_down = getattr(curses, "BUTTON5_PRESSED", 0) | getattr(curses, "BUTTON5_CLICKED", 0)
-                            amount = max(1, body_height // 3)
-                            if wheel_up and mouse_state & wheel_up:
-                                scroll_from_bottom = min(max(0, len(lines) - body_height), scroll_from_bottom + amount)
-                            elif wheel_down and mouse_state & wheel_down:
-                                scroll_from_bottom = max(0, scroll_from_bottom - amount)
-                    except curses.error:
-                        pass
-                    continue
-                if key == curses.KEY_F2:
-                    activate_settings()
-                    continue
-                if key == curses.KEY_F3:
-                    toggle_latest_thinking()
-                    continue
-                if key == curses.KEY_F4:
-                    status = "서버 모델 목록 확인 중…"
-                    check_models(force_selection=True)
-                    continue
-                if key in (3, 4):
-                    return 0
-                if key == 21:
-                    input_text = ""
-                    cursor = 0
-                    continue
-                if key == curses.KEY_RESIZE:
-                    screen.clearok(True)
-                    continue
-                if key in (curses.KEY_LEFT,):
-                    cursor = max(0, cursor - 1)
-                elif key in (curses.KEY_RIGHT,):
-                    cursor = min(len(input_text), cursor + 1)
-                elif key == curses.KEY_HOME:
-                    cursor = 0
-                elif key == curses.KEY_END:
-                    cursor = len(input_text)
-                elif key in (curses.KEY_BACKSPACE,):
-                    if cursor:
-                        input_text = input_text[:cursor - 1] + input_text[cursor:]
-                        cursor -= 1
-                elif key == curses.KEY_DC:
-                    input_text = input_text[:cursor] + input_text[cursor + 1:]
-                elif key == curses.KEY_PPAGE:
-                    scroll_from_bottom = min(max(0, len(lines) - body_height), scroll_from_bottom + max(1, body_height - 2))
-                elif key == curses.KEY_NPAGE:
-                    scroll_from_bottom = max(0, scroll_from_bottom - max(1, body_height - 2))
-                elif key == curses.KEY_UP:
-                    move_vertical(-1, input_rows)
-                elif key == curses.KEY_DOWN:
-                    move_vertical(1, input_rows)
-                continue
-
-            if key in ("\x03", "\x04"):
-                return 0
-            if key in ("\x7f", "\b"):
-                if cursor:
-                    input_text = input_text[:cursor - 1] + input_text[cursor:]
-                    cursor -= 1
-                continue
-            if key == "\x15":
-                input_text = ""
-                cursor = 0
-                continue
-            should_send = key == "\x13" or (key == "\r" if args.enter_sends else key == "\n")
-            should_insert_newline = (key == "\n" if args.enter_sends else key == "\r")
-            if should_insert_newline:
-                input_text = input_text[:cursor] + "\n" + input_text[cursor:]
-                cursor += 1
-                scroll_from_bottom = 0
-                continue
-            if should_send:
-                request_started_at = time.monotonic()
-                text = input_text.strip()
-                if not text or busy:
-                    continue
-                input_text = ""
-                cursor = 0
-                if not prompt_history or prompt_history[-1] != text:
-                    prompt_history.append(text)
-                history_index = len(prompt_history)
-                history_draft = ""
-                if text.lower() in ("/exit", "/quit"):
-                    return 0
-                if text.lower() == "/help":
-                    status = f"{input_hint} · ↑/↓ 입력 기록 · PgUp/PgDn 스크롤 · /reset · /exit · F2 설정 · Ctrl+U 지우기"
-                    continue
-                if text.lower() == "/reset":
-                    conversation.clear()
-                    scroll_from_bottom = 0
-                    status = "대화 기록을 지웠습니다."
-                    continue
-                if not args.model:
-                    input_text = text
-                    cursor = len(text)
-                    status = "모델이 선택되지 않았습니다. F4로 목록을 확인하세요."
-                    continue
-                conversation.append({"role": "user", "content": text})
-                payload: dict[str, Any] = {
-                    "model": args.model,
-                    "messages": [{"role": "system", "content": args.system}, *({"role": item["role"], "content": item["content"]} for item in conversation)],
-                    "stream": not args.no_stream,
-                }
-                if args.temperature is not None:
-                    payload["temperature"] = args.temperature
-                if args.max_tokens is not None:
-                    payload["max_tokens"] = args.max_tokens
-                apply_qwen_thinking_setting(payload, args.model, args.disable_qwen_thinking)
-                streaming_raw = ""
-                streaming_text = ""
-                streaming_thinking = ""
-                server_connected = False
-                busy = True
-                scroll_from_bottom = 0
-                status = "서버 연결 대기…"
-                first_text_seconds = None
-                threading.Thread(target=generate, args=(payload, request_started_at), daemon=True).start()
-                continue
-            if key.isprintable():
-                input_text = input_text[:cursor] + key + input_text[cursor:]
-                cursor += len(key)
-                scroll_from_bottom = 0
-
-    console_code_pages: tuple[int, int] | None = None
-    console_kernel32 = None
-    original_ctype_locale: str | None = None
-    if os.name == "nt":
-        try:
-            import ctypes
-            console_kernel32 = ctypes.windll.kernel32
-            console_code_pages = (console_kernel32.GetConsoleCP(), console_kernel32.GetConsoleOutputCP())
-            console_kernel32.SetConsoleCP(65001)
-            console_kernel32.SetConsoleOutputCP(65001)
-        except (AttributeError, OSError):
-            console_code_pages = None
-            console_kernel32 = None
-    try:
-        locale.setlocale(locale.LC_ALL, "")
-        if os.name == "nt":
-            original_ctype_locale = locale.setlocale(locale.LC_CTYPE)
-            try:
-                locale.setlocale(locale.LC_CTYPE, ".UTF8")
-            except locale.Error:
-                pass
-    except locale.Error:
-        pass
-    focus_reporting = os.name != "nt" and sys.stdout.isatty()
-    try:
-        if focus_reporting:
-            sys.stdout.write("\x1b[?1004h")
-            sys.stdout.flush()
-        return curses.wrapper(tui)
-    except KeyboardInterrupt:
-        return 0
-    finally:
-        if focus_reporting:
-            sys.stdout.write("\x1b[?1004l")
-            sys.stdout.flush()
-        if original_ctype_locale is not None:
-            try:
-                locale.setlocale(locale.LC_CTYPE, original_ctype_locale)
-            except locale.Error:
-                pass
-        if console_code_pages is not None and console_kernel32 is not None:
-            try:
-                if console_code_pages[0]:
-                    console_kernel32.SetConsoleCP(console_code_pages[0])
-                if console_code_pages[1]:
-                    console_kernel32.SetConsoleOutputCP(console_code_pages[1])
-            except OSError:
-                pass
+def run_tui(args: argparse.Namespace, url: str) -> int:
+    import textual
+    version = tuple(int(part) for part in textual.__version__.split(".")[:3])
+    if not (2, 1, 2) <= version < (3, 0, 0):
+        raise ImportError(f"Textual 2.1.2 이상 3.0 미만이 필요합니다 (설치된 버전: {textual.__version__}).")
+    from lchat_tui import ChatApp
+    ChatApp(args, url).run()
+    return 0
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     args.model_explicit = bool(args.model and args.model.strip())
+    args.log_dir = Path.cwd() / "log" if args.log else None
+    if args.log_dir is not None:
+        try:
+            args.log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError as error:
+            parser.error(f"로그 디렉터리를 만들 수 없습니다: {error}")
     config_path = (Path(args.config).expanduser() if args.config else DEFAULT_CONFIG_PATH).resolve()
     if args.config == "":
         print(config_path)
@@ -2041,6 +1001,8 @@ def main() -> int:
             command.append("--no-tui")
         if args.no_stream:
             command.append("--no-stream")
+        if args.log:
+            command.append("--log")
         child_env = os.environ.copy()
         if args.api_key is not None:
             child_env["OPENAI_API_KEY"] = args.api_key
@@ -2093,20 +1055,10 @@ def main() -> int:
         try:
             return run_tui(args, url)
         except ImportError as error:
-            if args.tui:
-                parser.error(f"ncurses TUI is unavailable: {error}")
-            print(f"[info] ncurses unavailable ({error}); falling back to plain mode.", file=sys.stderr)
-        except Exception as error:
-            import curses
-            if isinstance(error, curses.error):
-                if args.tui:
-                    parser.error(f"Could not start ncurses TUI: {error}")
-                print(f"[info] ncurses could not initialize ({error}); falling back to plain mode.", file=sys.stderr)
-            else:
-                raise
+            parser.error(f"Textual TUI를 사용할 수 없습니다. pip install -r requirements.txt: {error}")
 
     if not args.model:
-        parser.error("ncurses를 사용할 수 없어 모델 설정 창을 열지 못했습니다. --model 또는 config.json을 설정하세요.")
+        parser.error("Textual을 사용할 수 없어 모델 설정 창을 열지 못했습니다. --model 또는 config.json을 설정하세요.")
     print(f"lchat · model: {args.model}")
     print(f"Endpoint: {url}")
     print("Type /help for commands, /exit to quit.\n")
@@ -2150,7 +1102,7 @@ def main() -> int:
 
         print("assistant> ", end="", flush=True)
         try:
-            answer = complete(url, payload, args.api_key, args.timeout)
+            answer = complete(url, payload, args.api_key, args.timeout, args.log_dir)
         except (RuntimeError, OSError) as error:
             # Remove the unsent/failed user turn so a retry doesn't duplicate it.
             messages.pop()

@@ -18,7 +18,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from lchat import __version__, apply_qwen_thinking_setting, parse_bool
+from contextlib import ExitStack
+
+from lchat import ResponseLog, __version__, apply_qwen_thinking_setting, parse_bool
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "lchat" / "config.json"
@@ -505,7 +507,15 @@ def make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                     pass
                 return
 
-            with upstream:
+            stack = ExitStack()
+            try:
+                stack.enter_context(upstream)
+                response_log = stack.enter_context(ResponseLog(state.get("log_dir"), True))
+            except OSError as error:
+                stack.close()
+                send_json(self, 500, {"error": f"로그 파일 생성 실패: {error}"})
+                return
+            with stack:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache, no-transform")
@@ -514,6 +524,7 @@ def make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 self.end_headers()
                 try:
                     for line in upstream:
+                        response_log.write(line)
                         self.wfile.write(line)
                         self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError) as error:
@@ -537,6 +548,7 @@ def main() -> int:
     parser.add_argument("--temperature", type=float, help="Sampling temperature; env: LCHAT_TEMPERATURE")
     parser.add_argument("--max-tokens", type=int, help="Maximum generated tokens; env: LCHAT_MAX_TOKENS")
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming in the terminal UI")
+    parser.add_argument("--log", action="store_true", help="Save raw API responses and decoded text under ./log")
     parser.add_argument("--config", nargs="?", const="", metavar="FILE",
                         help="Use FILE; without FILE, print the default settings-file path and exit")
     parser.add_argument("--reset", action="store_true", help="Reset settings to defaults before running")
@@ -544,6 +556,12 @@ def main() -> int:
     ui_mode.add_argument("--tui", action="store_true", help="Run the terminal UI too (with --port, alongside the web UI)")
     ui_mode.add_argument("--no-tui", action="store_true", help="Disable the terminal UI; use web-only when hosting")
     args = parser.parse_args()
+    log_dir = Path.cwd() / "log" if args.log else None
+    if log_dir is not None:
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError as error:
+            parser.error(f"로그 디렉터리를 만들 수 없습니다: {error}")
     path = config_path_from_args(args.config)
     if args.config == "":
         print(path)
@@ -585,6 +603,8 @@ def main() -> int:
             command.extend(("--model", args.model))
         if args.no_stream:
             command.append("--no-stream")
+        if args.log:
+            command.append("--log")
         if config.get("temperature") not in (None, ""):
             command.extend(("--temperature", str(config["temperature"])))
         if config.get("max_tokens") not in (None, ""):
@@ -650,7 +670,7 @@ def main() -> int:
     if args.tui and not has_tty:
         parser.error("--tui를 사용하려면 대화형 터미널이 필요합니다.")
     run_tui = launch_tui and has_tty
-    state: dict[str, Any] = {"config": config, "config_path": path, "lock": threading.RLock(), "quiet": run_tui, "prompt_model": not bool(args.model and args.model.strip())}
+    state: dict[str, Any] = {"config": config, "config_path": path, "lock": threading.RLock(), "quiet": run_tui, "prompt_model": not bool(args.model and args.model.strip()), "log_dir": log_dir}
     try:
         server = ThreadingHTTPServer((config["host"], config["port"]), make_handler(state))
     except OSError as error:

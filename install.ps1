@@ -60,9 +60,9 @@ $version = [version]$versionText
 if ($version -lt [version]'3.9') { throw "Python 3.9+ is required; found $version." }
 Write-Host "Using Python $version at $Python"
 
-# Install the Windows curses compatibility module into the interpreter selected above.
-if (-not (Test-ExternalCommand -Executable $Python -Arguments @('-c', 'import curses'))) {
-    Write-Host 'Installing windows-curses into the selected Python environment...'
+# Install Textual into the selected interpreter.
+if (-not (Test-ExternalCommand -Executable $Python -Arguments @('-c', 'import textual; assert (2, 1, 2) <= tuple(map(int, textual.__version__.split(".")[:3])) < (3, 0, 0)'))) {
+    Write-Host 'Installing Textual into the selected Python environment...'
     if (-not (Test-ExternalCommand -Executable $Python -Arguments @('-m', 'pip', '--version'))) {
         $previousPreference = $ErrorActionPreference
         try {
@@ -78,7 +78,7 @@ if (-not (Test-ExternalCommand -Executable $Python -Arguments @('-c', 'import cu
     $venvProbe = Get-ExternalCommandOutput -Executable $Python `
         -Arguments @('-c', 'import sys; print(int(sys.prefix != sys.base_prefix))')
     if ($venvProbe.ExitCode -ne 0) { throw 'Could not inspect the selected Python environment.' }
-    $pipArgs = @('install', 'windows-curses')
+    $pipArgs = @('install', 'textual>=2.1.2,<3')
     if (([string]$venvProbe.Output).Trim() -ne '1') { $pipArgs += '--user' }
     $previousPreference = $ErrorActionPreference
     try {
@@ -88,9 +88,9 @@ if (-not (Test-ExternalCommand -Executable $Python -Arguments @('-c', 'import cu
     } finally {
         $ErrorActionPreference = $previousPreference
     }
-    if ($pipExitCode -ne 0) { throw 'Could not install windows-curses.' }
+    if ($pipExitCode -ne 0) { throw 'Could not install Textual.' }
 }
-if (-not (Test-ExternalCommand -Executable $Python -Arguments @('-c', 'import curses, urllib.request'))) {
+if (-not (Test-ExternalCommand -Executable $Python -Arguments @('-c', 'import textual, urllib.request'))) {
     throw 'Required Python modules are still unavailable.'
 }
 
@@ -109,11 +109,11 @@ try {
     New-Item -ItemType Directory -Path $tempDir | Out-Null
     $archive = Join-Path $tempDir 'lchat.zip'
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri 'https://github.com/ironiris/lchat/archive/refs/heads/main.zip' `
+    Invoke-WebRequest -Uri 'https://github.com/ironiris/lchat/archive/refs/tags/v0.3.0.zip' `
         -OutFile $archive -UseBasicParsing
     Expand-Archive -Path $archive -DestinationPath $tempDir -Force
-    $sourceDir = Join-Path $tempDir 'lchat-main'
-    foreach ($file in @('lchat.py', 'lchat_web.py')) {
+    $sourceDir = Join-Path $tempDir 'lchat-0.3.0'
+    foreach ($file in @('lchat.py', 'lchat_tui.py', 'lchat_math.py', 'lchat_web.py')) {
         if (-not (Test-Path (Join-Path $sourceDir $file))) {
             throw "Downloaded source is missing $file."
         }
@@ -121,6 +121,8 @@ try {
 
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     Copy-Item (Join-Path $sourceDir 'lchat.py') $InstallDir -Force
+    Copy-Item (Join-Path $sourceDir 'lchat_tui.py') $InstallDir -Force
+    Copy-Item (Join-Path $sourceDir 'lchat_math.py') $InstallDir -Force
     Copy-Item (Join-Path $sourceDir 'lchat_web.py') $InstallDir -Force
 
     $launcherDir = (Get-Location).Path

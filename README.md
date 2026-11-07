@@ -1,10 +1,10 @@
 # lchat
 
-**v0.2.1** · OpenAI 호환 API를 사용하는 가벼운 터미널 채팅 클라이언트입니다. 로컬 LLM의 응답을 확인하는 용도로 만들었으며, ncurses TUI와 선택적인 웹 UI를 제공합니다. Windows TUI에는 `windows-curses`를 사용합니다.
+**v0.3.0** · OpenAI 호환 API를 사용하는 가벼운 터미널 채팅 클라이언트입니다. 로컬 LLM의 응답을 확인하는 용도로 만들었으며, Textual 기반 전체 화면 TUI와 선택적인 웹 UI를 제공합니다.
 
 ## 요구사항
 
-- Python 3.9 이상. Linux/macOS 설치에는 Git, curl 및 Python `curses`가 필요합니다. Windows 설치 스크립트는 TUI용 `windows-curses`를 선택한 Python에 설치합니다.
+- Python 3.9 이상, Textual 2.1.2 이상 3.0 미만. 설치 스크립트는 선택한 Python에 Textual을 설치합니다. Linux/macOS 설치에는 Git과 curl도 필요합니다.
 - TUI에는 대화형 터미널이 필요합니다.
 - `GET /models`와 `POST /chat/completions`를 지원하는 OpenAI 호환 모델 서버
 
@@ -19,20 +19,20 @@ rm -f "$installer"
 lchat
 ```
 
-스크립트가 Python·필수 표준 라이브러리·Git을 확인하고, 프로그램을 `~/.local/share/lchat`에 내려받은 뒤 `~/.local/bin/lchat` 링크를 만듭니다. root 권한이나 추가 Python 패키지는 필요하지 않습니다. 누락된 시스템 의존성은 자동으로 설치하지 않고 안내합니다. 다른 파일이나 링크가 이미 있으면 덮어쓰지 않습니다. `~/.local/bin`이 PATH에 없으면 스크립트가 설정 방법을 안내합니다.
+스크립트가 Python·필수 표준 라이브러리·Git을 확인하고 Textual을 사용자 Python에 설치한 뒤, 프로그램을 `~/.local/share/lchat`에 내려받고 `~/.local/bin/lchat` 링크를 만듭니다. 시스템에서 사용자 pip 설치를 제한하는 경우에는 OS 패키지 관리자 등을 통해 Textual을 설치해야 합니다. 누락된 시스템 의존성은 자동으로 설치하지 않고 안내합니다. 다른 파일이나 링크가 이미 있으면 덮어쓰지 않습니다. `~/.local/bin`이 PATH에 없으면 스크립트가 설정 방법을 안내합니다.
 
-업데이트는 `git -C ~/.local/share/lchat pull --ff-only`로 할 수 있습니다. 설치 스크립트를 다시 실행하면 기존 설치는 수정하지 않습니다. 삭제하려면 `rm ~/.local/bin/lchat`과 `rm -rf ~/.local/share/lchat`을 실행하세요. 설정 파일은 별도로 유지됩니다.
+업데이트는 `git -C ~/.local/share/lchat pull --ff-only`로 할 수 있습니다. 의존성이 변경된 경우 요구 버전의 Textual도 설치하세요. pip 사용자 설치가 허용되는 환경에서는 `python3 -m pip install --user -r ~/.local/share/lchat/requirements.txt`를 사용할 수 있습니다. 설치 스크립트를 다시 실행하면 기존 설치의 소스는 수정하지 않습니다. 삭제하려면 `rm ~/.local/bin/lchat`과 `rm -rf ~/.local/share/lchat`을 실행하세요. 설정 파일은 별도로 유지됩니다.
 
-설치 및 명령 디렉터리는 각각 `LCHAT_INSTALL_DIR`, `LCHAT_BIN_DIR` 환경 변수로 변경할 수 있습니다. 스크립트 없이 직접 `git clone`한 뒤 `python3 lchat.py`로 실행해도 됩니다.
+설치 및 명령 디렉터리는 각각 `LCHAT_INSTALL_DIR`, `LCHAT_BIN_DIR` 환경 변수로 변경할 수 있습니다. 스크립트 없이 직접 `git clone`한 뒤 Textual을 설치하고 `python3 lchat.py`로 실행해도 됩니다. pip 사용자 설치가 허용된 환경에서는 `python3 -m pip install --user -r requirements.txt`를 사용하세요. Debian 등에서 `externally-managed-environment` 오류가 나면 OS 패키지 관리자에서 요구 버전의 Textual을 설치하세요. 예: `sudo apt install python3-textual` (패키지 버전이 2.1.2 이상 3.0 미만이어야 함). 이미 해당 버전이 설치되어 있다면 추가 설치는 필요 없습니다.
 
 ### Windows 설치 (웹 호스팅 미지원)
 
-PowerShell에서 설치 스크립트를 내려받아 실행하세요. 선택한 Python 3.9+에 `curses` 모듈이 없으면 `pip`로 `windows-curses`를 설치하고, 앱 파일을 `%LOCALAPPDATA%\lchat`에 내려받습니다. 설치 경로가 이미 있으면 앱 파일을 자동 업데이트하며 설정 파일은 유지합니다. 웹 호스팅은 실행하지 않습니다.
+PowerShell에서 설치 스크립트를 내려받아 실행하세요. 선택한 Python 3.9+에 `pip`로 Textual을 설치하고, 앱 파일을 `%LOCALAPPDATA%\lchat`에 내려받습니다. 설치 경로가 이미 있으면 앱 파일을 자동 업데이트하며 설정 파일은 유지합니다. 웹 호스팅은 실행하지 않습니다.
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 $installer = Join-Path $env:TEMP "lchat-install.ps1"
-Invoke-WebRequest https://raw.githubusercontent.com/ironiris/lchat/main/install.ps1 -OutFile $installer -UseBasicParsing
+Invoke-WebRequest https://raw.githubusercontent.com/ironiris/lchat/v0.3.0/install.ps1 -OutFile $installer -UseBasicParsing
 & $installer
 ```
 
@@ -41,7 +41,7 @@ Invoke-WebRequest https://raw.githubusercontent.com/ironiris/lchat/main/install.
 ```powershell
 $env:LCHAT_PYTHON = "C:\path\to\python.exe"
 $installer = Join-Path $env:TEMP "lchat-install.ps1"
-Invoke-WebRequest https://raw.githubusercontent.com/ironiris/lchat/main/install.ps1 -OutFile $installer -UseBasicParsing
+Invoke-WebRequest https://raw.githubusercontent.com/ironiris/lchat/v0.3.0/install.ps1 -OutFile $installer -UseBasicParsing
 & $installer
 .\lchat.bat
 ```
@@ -67,7 +67,7 @@ python3 lchat.py --help
 | 키 / 명령 | 동작 |
 | --- | --- |
 | Enter | 메시지 전송 (기본값) |
-| Ctrl+J | 입력 중 줄바꿈 (기본값) |
+| Ctrl+J | 입력 중 줄바꿈 (터미널에서 구분 지원 시) |
 | ↑ / ↓ | 입력 커서 이동, 경계에서 입력 기록 탐색 |
 | PageUp / PageDown, 마우스 휠 | 대화 스크롤 |
 | F2 | 환경 설정 열기 |
@@ -75,13 +75,15 @@ python3 lchat.py --help
 | F4 | 서버 모델 목록 열기 |
 | Ctrl+L | 화면 다시 그리기 |
 | Ctrl+U | 입력 지우기 |
+| Ctrl+Q / Ctrl+D | 종료 |
+| 마우스 드래그, Ctrl+C | 대화 내용 선택 및 복사 |
 | `/help`, `/reset`, `/exit` | 도움말, 대화 기록 지우기, 종료 |
 
-설정에서 Enter를 줄바꿈으로 바꾸면 Ctrl+Enter로 전송합니다. Ctrl+Enter를 구분하지 못하는 터미널에서는 Ctrl+S를 사용할 수 있습니다. 사용자 메시지는 오른쪽에 표시되며, 긴 입력은 줄바꿈됩니다.
+설정에서 Enter를 줄바꿈으로 바꾸면 Ctrl+S 또는 지원되는 터미널에서 Ctrl+Enter로 전송합니다. 사용자 메시지는 배경색과 함께 오른쪽에 표시되며, 긴 입력은 줄바꿈됩니다. 응답 중에는 최신 내용을 자동으로 따라갑니다. 이전 내용을 보기 위해 위로 스크롤하면 자동 이동이 멈추며, 맨 아래로 돌아가면 다시 따라갑니다.
 
-F2 설정의 **System prompt**에서 Enter를 누르면 여러 줄 편집 창이 열립니다. Enter는 줄바꿈, Ctrl+S 또는 F2는 적용, Esc는 취소입니다. 편집 창에서 적용한 뒤 설정창에서도 **저장**해야 파일에 반영됩니다.
+대화 내용은 마우스로 드래그해 선택하고 Ctrl+C로 복사합니다. 복사는 터미널의 OSC 52 클립보드 지원과 설정에 따라 동작하며, macOS 기본 터미널 등에서 지원하지 않는 경우 터미널의 자체 텍스트 선택 기능을 이용하세요. 응답 생성 중에는 새 내용이 표시되면서 선택이 해제될 수 있습니다.
 
-터미널의 포커스 이벤트를 지원하면 돌아올 때 화면을 다시 그립니다. 터미널 크기도 확인하며 Herdr 안에서는 재접속 복원을 위해 주기적으로 화면을 새로 그립니다. 화면이 깨지면 Ctrl+L을 눌러 보세요.
+F2 설정의 **System prompt**는 여러 줄로 편집할 수 있습니다. 설정창의 **저장**을 눌러 파일에 반영하세요. 화면이 깨지면 Ctrl+L을 눌러 보세요.
 
 ## 웹 UI
 
@@ -124,22 +126,38 @@ export OPENAI_API_KEY="your-api-key"  # 필요한 경우에만
 
 ## 응답 표시와 측정
 
-응답 중에는 연결 대기, 추론 및 출력 상태를 표시합니다. `<thinking>` 태그나 서버의 reasoning 필드는 기본적으로 접어 두며 TUI의 표시 줄/F3 또는 웹 UI에서 펼칠 수 있습니다. 완료 후 첫 출력까지의 시간, 생성 시간, tok/s와 전체 시간을 표시합니다. TUI는 `**강조**`, `### 제목`, Markdown 표, `---` 수평선과 `\[...\]` 표시 수식을 렌더링합니다. 수식은 SymPy가 설치되어 있으면 LaTeX 파서와 pretty printer를 사용하며, 간단한 분수는 SymPy 없이도 표시합니다.
-
-SymPy의 전체 LaTeX 지원이 필요하면 다음 선택 의존성을 설치하세요.
-
-```bash
-python3 -m pip install sympy antlr4-python3-runtime==4.11.0
-```
+응답 중에는 연결 대기, 추론 및 출력 상태를 표시합니다. `<thinking>` 태그나 서버의 reasoning 필드는 기본적으로 접어 두며 TUI의 F3 또는 웹 UI에서 펼칠 수 있습니다. 완료 후 첫 출력까지의 시간, 생성 시간, tok/s와 전체 시간을 표시합니다. TUI는 Textual Markdown 위젯으로 제목, 강조, 코드 블록, 표 등을 표시합니다. `\[...\]`, `$$...$$`, `\(...\)` 및 `$...$` 수식에서 분수, 제곱근, 위첨자와 자주 쓰는 기호를 별도 패키지 없이 유니코드로 표시합니다. 완전한 LaTeX 엔진은 아니며 지원하지 않는 명령은 원문을 유지합니다.
 
 서버가 `usage.completion_tokens`를 제공하면 해당 토큰 수로 속도를 계산합니다. 제공하지 않으면 텍스트 길이 기반 추정치를 `~`로 표시합니다. 시간은 클라이언트에서 측정하므로 서버 내부 추론 시간과 다를 수 있습니다.
 
 lchat은 모델 서버에 요청을 보내는 클라이언트입니다. GPU 선택, VRAM 할당 및 CPU/GPU 오프로딩은 모델 서버에서 설정해야 합니다.
 
+## 응답 디버그 로그
+
+모델이 실제로 보낸 내용을 확인하려면 로그 옵션을 사용하세요. 기본적으로 로그는 저장하지 않습니다.
+
+```bash
+lchat --log
+# 웹 UI 포함 실행에도 사용 가능
+lchat --port 8078 --log
+```
+
+명령을 실행한 디렉터리의 `log/`에 요청마다 별도 파일이 생성됩니다.
+
+- `*.sse`: 스트리밍 API의 원본 이벤트 (`data:`, JSON, `[DONE]` 포함)
+- `*.json`: `--no-stream`일 때 원본 JSON 응답
+- `*.answer.txt`: 스트리밍 조각을 합친 답변 원문. 화면의 수식 변환은 적용하지 않습니다.
+- `*.thinking.txt`: 서버가 별도 reasoning 필드를 제공한 경우 그 내용. `<think>` 등의 태그가 본문에 포함된 응답은 `answer.txt`에 그대로 기록됩니다.
+
+웹 UI와 터미널 UI를 함께 실행하면 양쪽 응답이 각각 기록됩니다. 원본 이벤트는 서버가 보낸 JSON 표기 그대로이므로 `\\n`, `\\u` 같은 이스케이프가 있을 수 있습니다. API 키나 요청 헤더, 사용자 요청은 별도로 기록하지 않지만, 서버 응답 자체에 대화 내용 등 민감한 정보가 포함될 수 있습니다. 파일은 사용자만 읽고 쓸 수 있도록 생성하며(OS 지원 범위 내), 공유하거나 공개 저장소에 올리기 전에 확인하세요. 저장소 루트의 `log/`는 Git에서 제외됩니다.
+
 ## 파일 구성
 
 - `install.sh`: 의존성 확인, 프로그램 다운로드 및 실행 링크 설치
-- `lchat.py`: 주 실행 파일과 터미널 UI
+- `lchat.py`: 주 실행 파일, API 클라이언트와 줄 단위 UI
+- `lchat_tui.py`: Textual 전체 화면 UI
+- `lchat_math.py`: 터미널 수식 변환
+- `requirements.txt`: Textual 의존성
 - `lchat_web.py`: 웹 서버 및 설정 검증
 - `index.html`: 웹 UI
 
