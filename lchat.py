@@ -50,8 +50,8 @@ def is_qwen_model(model: str) -> bool:
 
 
 def apply_qwen_thinking_setting(payload: dict[str, Any], model: str, disable_qwen_thinking: bool) -> None:
-    if disable_qwen_thinking and is_qwen_model(model):
-        payload["enable_thinking"] = False
+    if is_qwen_model(model):
+        payload["enable_thinking"] = not disable_qwen_thinking
 
 
 def parse_bool(value: str) -> bool:
@@ -155,6 +155,164 @@ def wrap_for_terminal(text: str, max_width: int) -> list[str]:
                     line = ""
         lines.append(line)
     return lines or [""]
+
+
+def wrap_markdown_bold(text: str, max_width: int) -> list[list[tuple[str, bool]]]:
+    """Wrap text while removing paired ** markers and preserving bold spans."""
+    max_width = max(1, max_width)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    styled: list[tuple[str, bool]] = []
+    position = 0
+    while position < len(text):
+        opening = text.find("**", position)
+        if opening < 0:
+            styled.append((text[position:], False))
+            break
+        closing = text.find("**", opening + 2)
+        if closing < 0:
+            styled.append((text[position:], False))
+            break
+        if opening > position:
+            styled.append((text[position:opening], False))
+        if closing > opening + 2:
+            styled.append((text[opening + 2:closing], True))
+        position = closing + 2
+
+    paragraphs: list[list[tuple[str, bool]]] = [[]]
+    for segment, bold in styled:
+        for char in segment:
+            if char == "\n":
+                paragraphs.append([])
+            elif char == "\t":
+                paragraphs[-1].extend((" ", bold) for _ in range(4))
+            else:
+                paragraphs[-1].append((char, bold))
+
+    def compact(chars: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+        result: list[tuple[str, bool]] = []
+        for char, bold in chars:
+            if result and result[-1][1] == bold:
+                result[-1] = (result[-1][0] + char, bold)
+            else:
+                result.append((char, bold))
+        return result
+
+    wrapped: list[list[tuple[str, bool]]] = []
+    for paragraph in paragraphs:
+        words: list[list[tuple[str, bool]]] = []
+        word: list[tuple[str, bool]] = []
+        for char, bold in paragraph:
+            if char.isspace():
+                if word:
+                    words.append(word)
+                    word = []
+            else:
+                word.append((char, bold))
+        if word:
+            words.append(word)
+
+        line: list[tuple[str, bool]] = []
+        line_width = 0
+        for word in words:
+            chunks: list[list[tuple[str, bool]]] = []
+            chunk: list[tuple[str, bool]] = []
+            chunk_width = 0
+            for char, bold in word:
+                char_width = terminal_cell_width(char)
+                if chunk and chunk_width + char_width > max_width:
+                    chunks.append(chunk)
+                    chunk = []
+                    chunk_width = 0
+                chunk.append((char, bold))
+                chunk_width += char_width
+            if chunk or not chunks:
+                chunks.append(chunk)
+
+            for index, part in enumerate(chunks):
+                separator = [(" ", False)] if line and index == 0 else []
+                part_width = sum(terminal_cell_width(char) for char, _ in part)
+                if line and line_width + len(separator) + part_width > max_width:
+                    wrapped.append(compact(line))
+                    line = part.copy()
+                    line_width = part_width
+                else:
+                    line.extend(separator)
+                    line.extend(part)
+                    line_width += len(separator) + part_width
+                if index < len(chunks) - 1:
+                    wrapped.append(compact(line))
+                    line = []
+                    line_width = 0
+        wrapped.append(compact(line))
+    return wrapped or [[]]
+
+
+def markdown_heading_text(line: str) -> str | None:
+    indent = len(line) - len(line.lstrip(" "))
+    if indent > 3:
+        return None
+    content = line[indent:]
+    marker_count = len(content) - len(content.lstrip("#"))
+    if not 1 <= marker_count <= 6 or marker_count == len(content):
+        return None
+    if content[marker_count] not in (" ", "\t"):
+        return None
+    title = content[marker_count:].strip()
+    if title.endswith("#"):
+        without_closing = title.rstrip("#")
+        if without_closing.endswith((" ", "\t")):
+            title = without_closing.rstrip()
+    return title or None
+
+
+def is_markdown_horizontal_rule(line: str) -> bool:
+    stripped = line.strip()
+    if len(stripped) < 3:
+        return False
+    marker = stripped[0]
+    return marker in "-*_" and sum(char == marker for char in stripped) >= 3 and all(
+        char == marker or char.isspace() for char in stripped
+    )
+
+
+def wrap_assistant_markdown(text: str, max_width: int) -> list[tuple[list[tuple[str, bool]], str]]:
+    """Wrap assistant text and render common Markdown headings and rules."""
+    max_width = max(1, max_width)
+    paragraphs = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    rendered: list[tuple[list[tuple[str, bool]], str]] = []
+    in_code_block = False
+    for paragraph in paragraphs:
+        is_fence = paragraph.lstrip(" \t").startswith("```")
+        if in_code_block or is_fence:
+            rendered.extend(([(line, False)], "body") for line in wrap_for_terminal(paragraph, max_width))
+            if is_fence:
+                in_code_block = not in_code_block
+            continue
+
+        if is_markdown_horizontal_rule(paragraph):
+            rendered.append(([ ("  " + "─" * max_width, False) ], "rule"))
+            continue
+
+        title = markdown_heading_text(paragraph)
+        if title is None:
+            rendered.extend((line, "body") for line in wrap_markdown_bold(paragraph, max_width))
+            continue
+
+        title_lines = wrap_markdown_bold(title, max(1, max_width - 4))
+        inner_width = max(
+            1,
+            *(sum(terminal_cell_width(segment) for segment, _ in line) for line in title_lines),
+        )
+        top = "  ┌" + "─" * (inner_width + 2) + "┐"
+        bottom = "  └" + "─" * (inner_width + 2) + "┘"
+        rendered.append(([(top, False)], "box"))
+        for line in title_lines:
+            line_width = sum(terminal_cell_width(segment) for segment, _ in line)
+            content = [("  │ ", False), *((segment, True) for segment, _ in line)]
+            content.append((" " * (inner_width - line_width) + " │", False))
+            rendered.append((content, "box"))
+        rendered.append(([(bottom, False)], "box"))
+    return rendered
 
 
 def layout_input_text(text: str, max_width: int) -> list[tuple[str, int, int, bool]]:
@@ -583,6 +741,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             curses.init_pair(1, curses.COLOR_CYAN, -1)
             curses.init_pair(2, curses.COLOR_GREEN, -1)
             curses.init_pair(3, curses.COLOR_RED, -1)
+            curses.init_pair(4, curses.COLOR_WHITE, -1)
         except curses.error:
             pass
 
@@ -745,7 +904,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     except curses.error:
                         pass
 
-        def edit_system_prompt(initial: str) -> str | None:
+        def edit_text_popup(initial: str, title: str, multiline: bool = False) -> str | None:
             text = initial
             cursor = len(text)
             first_row = 0
@@ -773,12 +932,16 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 win.erase()
                 win.box()
                 try:
-                    win.addstr(1, 2, "시스템 프롬프트 편집", curses.A_BOLD | curses.color_pair(1))
+                    win.addstr(1, 2, title, curses.A_BOLD | curses.color_pair(1))
                     for row, (line, _, _, _) in enumerate(layout[first_row:first_row + visible_rows], 2):
                         if line:
                             win.addstr(row, 2, line)
-                    win.addstr(height - 3, 2, "[ 적용: Ctrl+S / F2 ]   [ 취소: Esc ]", curses.color_pair(1))
-                    win.addstr(height - 2, 2, "Enter 줄바꿈 · 방향키 이동 · Ctrl+U 전체 지우기")
+                    if multiline:
+                        win.addstr(height - 3, 2, "[ 적용: Ctrl+S / F2 ]   [ 취소: Esc ]", curses.color_pair(1))
+                        win.addstr(height - 2, 2, "Enter 줄바꿈 · 방향키 · Ctrl+U 지우기")
+                    else:
+                        win.addstr(height - 3, 2, "[Enter/Ctrl+S 적용 · Esc 취소]", curses.color_pair(1))
+                        win.addstr(height - 2, 2, "방향키 이동 · Home/End · Ctrl+U 지우기")
                     win.move(2 + cursor_row - first_row, min(width - 2, 2 + cursor_column))
                 except curses.error:
                     pass
@@ -794,6 +957,8 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 if key in ("\x1b", "\x03", "\x04"):
                     return None
                 if key in ("\x13", curses.KEY_F2):
+                    return text
+                if not multiline and key in ("\n", "\r", curses.KEY_ENTER):
                     return text
                 if key == curses.KEY_RESIZE:
                     continue
@@ -837,7 +1002,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     text = text[:cursor] + text[cursor + 1:]
                 elif key == "\x15":
                     text, cursor = "", 0
-                elif key in ("\n", "\r", curses.KEY_ENTER):
+                elif key in ("\n", "\r", curses.KEY_ENTER) and multiline:
                     if len(text) < 20_000:
                         text = text[:cursor] + "\n" + text[cursor:]
                         cursor += 1
@@ -865,7 +1030,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 ("system", "System prompt", args.system),
                 ("enter_sends", "Enter 동작", bool(args.enter_sends)),
                 ("tui_enabled", "TUI 실행", bool(args.tui_enabled)),
-                ("disable_qwen_thinking", "Qwen 추론 끄기", bool(args.disable_qwen_thinking)),
+                ("disable_qwen_thinking", "Qwen 추론", bool(args.disable_qwen_thinking)),
                 ("timeout", "Timeout seconds", str(args.timeout)),
                 ("temperature", "Temperature", "" if args.temperature is None else str(args.temperature)),
                 ("max_tokens", "Max tokens", "" if args.max_tokens is None else str(args.max_tokens)),
@@ -879,7 +1044,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             focus = 0
             field_count = len(fields)
             save_focus, cancel_focus = field_count, field_count + 1
-            message = "Tab/↑↓ 이동 · Space 전환 · Enter 저장/선택 · Esc 취소 · Ctrl+U 지우기"
+            message = "←/→ 값 선택 · ↑↓ 이동 · Enter 저장"
             button_y = height - 4
             status_y = height - 3
             hint_y = height - 2
@@ -1019,8 +1184,10 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     value = values[key]
                     if key == "enter_sends":
                         shown = "Enter 전송 · Ctrl+J 줄바꿈" if value else "Enter 줄바꿈 · Ctrl+Enter 전송"
-                    elif key in ("web_enabled", "tui_enabled", "disable_qwen_thinking"):
-                        shown = "켜짐" if value else "꺼짐"
+                    elif key == "disable_qwen_thinking":
+                        shown = "끄기" if value else "켜기"
+                    elif key in ("web_enabled", "tui_enabled"):
+                        shown = "켜기" if value else "끄기"
                     elif key == "system":
                         shown = "[Enter: 편집] " + (str(value).replace("\r", "").replace("\n", " ↵ ") if value else "<비어 있음>")
                     elif key == "api_key":
@@ -1030,7 +1197,8 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     else:
                         shown = str(value).replace("\r", "").replace("\n", " ↵ ") if str(value) else "<API 기본값>"
                     prefix = "▶ " if focus == index else "  "
-                    line = f"{prefix}{label:<18} : {shown}"
+                    label_padding = " " * max(0, 18 - terminal_cell_width(label))
+                    line = f"{prefix}{label}{label_padding} : {shown}"
                     attr = curses.A_REVERSE if focus == index else 0
                     draw_modal_text(row, line, attr)
                 draw_modal_text(button_y, " " * (width - 5))
@@ -1079,6 +1247,11 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     elif key == curses.KEY_DOWN:
                         focus = min(cancel_focus, focus + 1)
                         continue
+                    elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+                        if focus < field_count and fields[focus][0] in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
+                            field_key = fields[focus][0]
+                            values[field_key] = key == (curses.KEY_LEFT if field_key == "disable_qwen_thinking" else curses.KEY_RIGHT)
+                        continue
                     elif key == curses.KEY_BTAB:
                         focus = max(0, focus - 1)
                         continue
@@ -1120,13 +1293,24 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                             return saved
                         continue
                     if focus < field_count and fields[focus][0] == "system":
-                        edited = edit_system_prompt(str(values["system"]))
+                        edited = edit_text_popup(str(values["system"]), "시스템 프롬프트 편집", multiline=True)
                         refresh_after_modal()
                         win.touchwin()
                         if edited is not None:
                             values["system"] = edited
                             message = "프롬프트 적용됨 · 설정 창에서 저장해야 파일에 반영됩니다."
                         continue
+                    if focus < field_count:
+                        field_key = fields[focus][0]
+                        field_value = str(values[field_key])
+                        if field_key != "api_key" and len(field_value) >= 5:
+                            edited = edit_text_popup(field_value, f"{labels[field_key]} 편집")
+                            refresh_after_modal()
+                            win.touchwin()
+                            if edited is not None:
+                                values[field_key] = edited
+                                message = f"{labels[field_key]} 적용됨 · 설정 창에서 저장해야 파일에 반영됩니다."
+                            continue
                     if focus < field_count and fields[focus][0] in ("web_enabled", "enter_sends", "tui_enabled", "disable_qwen_thinking"):
                         field_key = fields[focus][0]
                         values[field_key] = not bool(values[field_key])
@@ -1172,27 +1356,30 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             input_hint = "Enter 전송 · Ctrl+J 줄바꿈" if args.enter_sends else "Enter 줄바꿈 · Ctrl+Enter 전송 (Ctrl+S 대체)"
             status = f"설정 저장 완료 · {input_hint} · TUI/웹 실행 설정은 다음 실행부터 적용"
 
-        def transcript_lines(columns: int) -> list[tuple[str, int, int | None]]:
-            rendered: list[tuple[str, int, int | None]] = []
+        def transcript_lines(columns: int) -> list[tuple[list[tuple[str, bool]], int, int | None, str]]:
+            rendered: list[tuple[list[tuple[str, bool]], int, int | None, str]] = []
             for message_index, message in enumerate(conversation):
                 if message["role"] == "user":
-                    rendered.extend((line, curses.color_pair(2), None) for line in user_bubble_lines(message["content"], columns))
-                    rendered.append(("", 0, None))
+                    rendered.extend(([(line, False)], curses.color_pair(2), None, "plain") for line in user_bubble_lines(message["content"], columns))
+                    rendered.append(([], 0, None, "plain"))
                     continue
                 thinking = str(message.get("thinking", ""))
                 expanded = bool(message.get("thinking_expanded", False))
                 if thinking:
                     label = "LLM · [생각 접기 · F3]" if expanded else "LLM · [생각 펼치기 · F3]"
-                    rendered.append((label, curses.color_pair(1), message_index))
+                    rendered.append(([(label, False)], curses.color_pair(1), message_index, "plain"))
                     if expanded:
-                        rendered.append(("  ┌─ 생각 ─", curses.color_pair(1), None))
-                        rendered.extend(("  " + line, 0, None) for line in wrap_for_terminal(thinking, max(1, columns - 8)))
-                        rendered.append(("  └────────", curses.color_pair(1), None))
+                        rendered.append(([ ("  ┌─ 생각 ─", False) ], curses.color_pair(1), None, "plain"))
+                        rendered.extend(([ ("  " + line, False) ], 0, None, "plain") for line in wrap_for_terminal(thinking, max(1, columns - 8)))
+                        rendered.append(([ ("  └────────", False) ], curses.color_pair(1), None, "plain"))
                 else:
-                    rendered.append(("LLM", curses.color_pair(1), None))
-                for line in wrap_for_terminal(message["content"], max(1, columns - 6)):
-                    rendered.append(("  " + line, 0, None))
-                rendered.append(("", 0, None))
+                    rendered.append(([ ("LLM", False) ], curses.color_pair(1), None, "plain"))
+                for line, style in wrap_assistant_markdown(message["content"], max(1, columns - 6)):
+                    if style in ("box", "rule"):
+                        rendered.append((line, curses.color_pair(4), None, "answer"))
+                    else:
+                        rendered.append(([ ("  ", False), *line ], curses.color_pair(4), None, "answer"))
+                rendered.append(([], 0, None, "plain"))
             if busy:
                 _, inline_thinking = split_thinking_text(streaming_raw)
                 if streaming_thinking or inline_thinking:
@@ -1204,9 +1391,12 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 else:
                     stage = "서버 연결 대기"
                 dots = (".", "..", "...", "..")[int(time.monotonic() * 3) % 4]
-                rendered.append((f"LLM · {stage}{dots}", curses.color_pair(1), None))
-                for line in wrap_for_terminal(streaming_text, max(1, columns - 6)):
-                    rendered.append(("  " + line, 0, None))
+                rendered.append(([(f"LLM · {stage}{dots}", False)], curses.color_pair(1), None, "plain"))
+                for line, style in wrap_assistant_markdown(streaming_text, max(1, columns - 6)):
+                    if style in ("box", "rule"):
+                        rendered.append((line, curses.color_pair(4), None, "answer"))
+                    else:
+                        rendered.append(([ ("  ", False), *line ], curses.color_pair(4), None, "answer"))
             return rendered
 
         def check_models(force_selection: bool = False) -> None:
@@ -1295,7 +1485,7 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
             rows, columns = screen.getmaxyx()
             input_cells = max(1, columns - 7)
             input_rows = layout_input_text(input_text, input_cells)
-            lines: list[tuple[str, int, int | None]] = []
+            lines: list[tuple[list[tuple[str, bool]], int, int | None, str]] = []
             thinking_toggle_rows.clear()
             if rows < 12 or columns < 24:
                 addstr(0, 0, "터미널을 조금 더 크게 늘려 주세요. (최소 24x12)", curses.A_BOLD)
@@ -1318,8 +1508,15 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                 scroll_from_bottom = min(max_scroll, max(0, scroll_from_bottom))
                 end = len(lines) - scroll_from_bottom
                 start = max(0, end - body_height)
-                for row, (line, attr, toggle_index) in enumerate(lines[start:end], body_start):
-                    addstr(row, 0, line, attr)
+                for row, (segments, attr, toggle_index, line_style) in enumerate(lines[start:end], body_start):
+                    column = 0
+                    for text, bold in segments:
+                        if line_style == "answer":
+                            segment_attr = curses.color_pair(4) | (curses.A_BOLD if bold else curses.A_DIM)
+                        else:
+                            segment_attr = attr | (curses.A_BOLD if bold else 0)
+                        addstr(row, column, text, segment_attr)
+                        column += terminal_cell_width(text)
                     if toggle_index is not None:
                         thinking_toggle_rows[row] = toggle_index
 

@@ -100,9 +100,9 @@ python3 lchat.py --port 8078 --no-tui  # 웹 UI만
 
 ## 설정
 
-TUI의 F2 또는 웹 UI의 설정 버튼에서 endpoint, 모델 ID, API 키, 시스템 프롬프트, timeout, temperature, 최대 생성 토큰, Qwen 추론 끄기, 입력 키 동작, TUI 및 웹 호스팅 설정을 변경할 수 있습니다. 저장 전에는 endpoint와 모델 ID를 확인합니다. UI 실행 방식 및 웹 바인딩 변경은 다음 실행부터 적용됩니다.
+TUI의 F2 또는 웹 UI의 설정 버튼에서 endpoint, 모델 ID, API 키, 시스템 프롬프트, timeout, temperature, 최대 생성 토큰, Qwen 추론 켜기/끄기, 입력 키 동작, TUI 및 웹 호스팅 설정을 변경할 수 있습니다. 저장 전에는 endpoint와 모델 ID를 확인합니다. UI 실행 방식 및 웹 바인딩 변경은 다음 실행부터 적용됩니다.
 
-**Qwen 추론 끄기**를 선택하면, 모델 ID에 `qwen`이 포함된 경우에만 요청에 `enable_thinking: false`를 추가합니다. 선택하지 않으면 이 필드를 보내지 않아 서버 기본 동작을 유지합니다. 해당 옵션을 모델 서버가 지원해야 적용됩니다. 설정 파일 키는 `disable_qwen_thinking`이며 `LCHAT_DISABLE_QWEN_THINKING=true` 환경 변수로도 켤 수 있습니다.
+**Qwen 추론** 설정은 모델 ID에 `qwen`이 포함된 경우 요청에 `enable_thinking: true` 또는 `false`를 명시적으로 보냅니다. 모델 서버와 해당 모델이 이 옵션을 지원해야 적용됩니다. 설정 파일 키는 `disable_qwen_thinking`이며 `LCHAT_DISABLE_QWEN_THINKING=true` 환경 변수로 추론을 끌 수 있습니다.
 
 설정 파일은 기본적으로 `~/.config/lchat/config.json`에 저장됩니다. `XDG_CONFIG_HOME`이 있으면 그 아래의 `lchat/config.json`을 사용합니다. API 키는 설정 파일에 저장될 수 있으므로 파일 권한을 `600`으로 제한합니다. 설정 파일을 공유하거나 Git에 올리지 마세요.
 
