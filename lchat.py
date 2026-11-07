@@ -28,7 +28,7 @@ except ImportError:
     readline = None
 
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 DEFAULT_CONFIG_PATH = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "lchat" / "config.json"
 DEFAULT_SETTINGS: dict[str, Any] = {
     "endpoint": "http://localhost:8070/v1",

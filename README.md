@@ -1,6 +1,6 @@
 # lchat
 
-**v0.2.0** · OpenAI 호환 API를 사용하는 가벼운 터미널 채팅 클라이언트입니다. 로컬 LLM의 응답을 확인하는 용도로 만들었으며, ncurses TUI와 선택적인 웹 UI를 제공합니다. Windows TUI에는 `windows-curses`를 사용합니다.
+**v0.2.1** · OpenAI 호환 API를 사용하는 가벼운 터미널 채팅 클라이언트입니다. 로컬 LLM의 응답을 확인하는 용도로 만들었으며, ncurses TUI와 선택적인 웹 UI를 제공합니다. Windows TUI에는 `windows-curses`를 사용합니다.
 
 ## 요구사항
 
