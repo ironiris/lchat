@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from textual.events import MouseMove, MouseScrollDown, MouseScrollUp
 
-from lchat_tui import ChatApp, ChatTableContent, Composer, ModelScreen, SettingsScreen, TABLE_BOX
+from lchat_tui import ChatApp, ChatTableContent, Composer, ModelScreen, SettingsScreen, TABLE_BOX, chat_markdown_parser
 
 
 def arguments(path):
@@ -62,6 +62,33 @@ class TextualTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("enter")
                 await pilot.pause()
                 self.assertEqual(app.conversation, [])
+
+    async def test_korean_bold_with_quotes_and_adjacent_text(self):
+        text = '하늘이 파란 이유는 **“태양빛이 파란색 빛을 잘 흩기 때문”**이에요.'
+        def reply(args, url, events, payload, started):
+            events.put(('done', {'content': text, 'thinking': '', 'metrics': {
+                'first_text_seconds': .1, 'total_seconds': 1.0, 'generation_seconds': .9,
+                'tokens_per_second': 10.0, 'exact_tokens': True}}))
+        parser = chat_markdown_parser()
+        tokens = parser.parse(text)[1].children
+        self.assertEqual([token.type for token in tokens].count('strong_open'), 1)
+        self.assertEqual(''.join(token.content for token in tokens), text.replace('**', ''))
+        tokens = parser.parse('앞**“강조”**뒤')[1].children
+        self.assertIn('strong_open', [token.type for token in tokens])
+        tokens = parser.parse('`**“코드”**` 와 **일반 강조**입니다')[1].children
+        self.assertEqual([token.type for token in tokens].count('strong_open'), 1)
+        self.assertEqual(next(token.content for token in tokens if token.type == 'code_inline'), '**“코드”**')
+        with patch('lchat_tui.fetch_models_response', return_value=b'{"data":[{"id":"test"}]}'), patch('lchat_tui.generate', side_effect=reply):
+            app = ChatApp(arguments('/tmp/nonexistent-lchat-config'), 'http://localhost:8070/v1/chat/completions')
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause(.2)
+                await pilot.press('x', 'enter')
+                await pilot.pause(.5)
+                paragraph = app.query_one('MarkdownParagraph')
+                self.assertEqual(paragraph._text.plain, text.replace('**', ''))
+                emphasized = [span for span in paragraph._text.spans if span.style and span.style.bold]
+                self.assertEqual(len(emphasized), 1)
+                self.assertEqual(paragraph._text.plain[emphasized[0].start:emphasized[0].end], '“태양빛이 파란색 빛을 잘 흩기 때문”')
 
     async def test_chat_colors_headings_rules_math_and_tables(self):
         def styled_response(args, url, events, payload, started):

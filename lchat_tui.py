@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from markdown_it import MarkdownIt
+from markdown_it.rules_inline.state_inline import Delimiter, StateInline
 from rich.box import Box
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -23,6 +25,37 @@ from lchat_web import fetch_models_response, parse_available_models
 
 
 TABLE_BOX = Box("┌─┬┒\n│ │┃\n├─┼┨\n│ │┃\n├─┼┨\n├─┼┨\n│ │┃\n┕━┷┛\n")
+
+
+def tokenize_emphasis(state: StateInline, silent: bool) -> bool:
+    """Allow Korean text adjacent to bold spans containing typographic quotes."""
+    start = state.pos
+    marker = state.src[start]
+    if silent or marker not in ("_", "*"):
+        return False
+    scanned = state.scanDelims(start, marker == "*")
+    can_open, can_close = scanned.can_open, scanned.can_close
+    if marker == "*" and scanned.length == 2:
+        previous = state.src[start - 1] if start else " "
+        end = start + scanned.length
+        following = state.src[end] if end < state.posMax else " "
+        if following in "“‘「『《〈«" and not previous.isspace():
+            can_open = True
+        if previous in "”’」』》〉»" and not following.isspace():
+            can_close = True
+    for _ in range(scanned.length):
+        token = state.push("text", "", 0)
+        token.content = marker
+        state.delimiters.append(Delimiter(marker=ord(marker), length=scanned.length,
+            token=len(state.tokens) - 1, end=-1, open=can_open, close=can_close))
+    state.pos += scanned.length
+    return True
+
+
+def chat_markdown_parser() -> MarkdownIt:
+    parser = MarkdownIt("gfm-like")
+    parser.inline.ruler.at("emphasis", tokenize_emphasis)
+    return parser
 
 
 class ChatTableContent(MarkdownTableContent):
@@ -447,7 +480,7 @@ class ChatApp(App):
         chat = self.query_one(ChatScroll)
         chat.mount(Horizontal(Static(text, classes="user", markup=False), classes="user-row"))
         self.conversation.append({"role": "user", "content": text})
-        self.current = Markdown("_응답 대기 중…_", classes="assistant")
+        self.current = Markdown("_응답 대기 중…_", classes="assistant", parser_factory=chat_markdown_parser)
         chat.mount(self.current)
         chat.follow_latest()
         messages = [{"role": "system", "content": self.args.system}] + [{"role": x["role"], "content": x["content"]} for x in self.conversation]
