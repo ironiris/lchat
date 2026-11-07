@@ -1686,6 +1686,12 @@ def run_tui(args: argparse.Namespace, url: str) -> int:
                     status = f"API 오류: {value}"
 
             sync_terminal()
+            if os.name == "nt":
+                # PDCurses can leave stale console cells after a window repaint; force a full redraw.
+                try:
+                    screen.clearok(True)
+                except curses.error:
+                    pass
             screen.erase()
             rows, columns = screen.getmaxyx()
             input_cells = max(1, columns - 7)
